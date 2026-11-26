@@ -27,6 +27,7 @@ public sealed class GenieOverlayWindow : Form
 {
     private sealed class ActiveGenieItem : IDisposable
     {
+        public required nint Hwnd;
         public required ID3D11Texture2D Texture;
         public required ID3D11ShaderResourceView Srv;
         public required Rectangle WinScreenRect;
@@ -128,17 +129,17 @@ public sealed class GenieOverlayWindow : Form
 
     public void PlayGenieCollapse(WindowSnapshot snapshot, Rectangle dockIconScreenRect, DockPosition dockPos, Action? onComplete = null)
     {
-        StartAnimation(snapshot, dockIconScreenRect, dockPos, mode: 0, isEmerge: false, durationSec: 0.48f, onComplete);
+        StartAnimation(snapshot, dockIconScreenRect, dockPos, mode: 0, isEmerge: false, durationSec: 0.42f, onComplete);
     }
 
     public void PlayGenieEmerge(WindowSnapshot snapshot, Rectangle dockIconScreenRect, DockPosition dockPos, Action? onComplete = null)
     {
-        StartAnimation(snapshot, dockIconScreenRect, dockPos, mode: 0, isEmerge: true, durationSec: 0.48f, onComplete);
+        StartAnimation(snapshot, dockIconScreenRect, dockPos, mode: 0, isEmerge: true, durationSec: 0.44f, onComplete);
     }
 
     public void PlayWindowMorph(WindowSnapshot snapshot, Rectangle targetScreenRect, Action? onComplete = null)
     {
-        StartAnimation(snapshot, targetScreenRect, DockPosition.Bottom, mode: 1, isEmerge: false, durationSec: 0.32f, onComplete);
+        StartAnimation(snapshot, targetScreenRect, DockPosition.Bottom, mode: 1, isEmerge: false, durationSec: 0.28f, onComplete);
     }
 
     private void StartAnimation(
@@ -167,7 +168,7 @@ public sealed class GenieOverlayWindow : Form
         }
 
         float speed = Math.Clamp(_configMgr.Current.Glass.AnimationSpeed, 0.4f, 2.0f);
-        float scaledDuration = Math.Clamp(durationSec / MathF.Sqrt(speed), 0.30f, 0.85f);
+        float scaledDuration = Math.Clamp(durationSec / MathF.Sqrt(speed), 0.28f, 0.72f);
         int edge = dockPos switch
         {
             DockPosition.Left => 1,
@@ -180,31 +181,48 @@ public sealed class GenieOverlayWindow : Form
 
         lock (_gpu.DeviceLock)
         {
+            // Deduplicate: replace any in-flight animation for the same window handle so two never overlap
+            if (snapshot.Hwnd != 0)
+            {
+                for (int i = _active.Count - 1; i >= 0; i--)
+                {
+                    if (_active[i].Hwnd == snapshot.Hwnd)
+                    {
+                        var stale = _active[i];
+                        _active.RemoveAt(i);
+                        stale.OnComplete?.Invoke();
+                        stale.Dispose();
+                    }
+                }
+            }
+
             var texDesc = new Texture2DDescription
             {
                 Width = snapshot.Width,
                 Height = snapshot.Height,
-                MipLevels = 1,
+                MipLevels = 0, // Full hardware mip chain keeps shrinking text & edges razor sharp
                 ArraySize = 1,
                 Format = Format.B8G8R8A8_UNorm,
                 SampleDescription = new SampleDescription(1, 0),
-                Usage = ResourceUsage.Immutable,
-                BindFlags = BindFlags.ShaderResource
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.ShaderResource | BindFlags.RenderTarget,
+                MiscFlags = ResourceOptionFlags.GenerateMips
             };
 
-            ID3D11Texture2D tex;
+            var tex = _gpu.D3DDevice.CreateTexture2D(texDesc);
             unsafe
             {
                 fixed (byte* ptr = snapshot.BgraPixels)
                 {
-                    var subData = new SubresourceData(ptr, snapshot.Width * 4);
-                    tex = _gpu.D3DDevice.CreateTexture2D(texDesc, subData);
+                    _gpu.D3DContext.UpdateSubresource(tex, 0, null, (nint)ptr, snapshot.Width * 4, 0);
                 }
             }
             var srv = _gpu.D3DDevice.CreateShaderResourceView(tex);
+            _gpu.D3DContext.GenerateMips(srv);
 
             _active.Add(new ActiveGenieItem
             {
+                Hwnd = snapshot.Hwnd,
                 Texture = tex,
                 Srv = srv,
                 WinScreenRect = snapshot.ScreenBounds,
@@ -287,7 +305,7 @@ public sealed class GenieOverlayWindow : Form
                     ctx.IASetInputLayout(null);
                     ctx.VSSetShader(_gpu.GenieVertexShader);
                     ctx.PSSetShader(_gpu.GeniePixelShader);
-                    ctx.PSSetSampler(0, _gpu.LinearClampSampler);
+                    ctx.PSSetSampler(0, _gpu.AnisoClampSampler);
                     ctx.OMSetBlendState(_gpu.PremultipliedBlendState);
 
                     foreach (var item in _active)
@@ -368,25 +386,26 @@ public sealed class GenieOverlayWindow : Form
     {
         lock (gpu.DeviceLock)
         {
-            ID3D11Texture2D winTex;
             var winTexDesc = new Texture2DDescription
             {
                 Width = snapshot.Width,
                 Height = snapshot.Height,
-                MipLevels = 1,
+                MipLevels = 0,
                 ArraySize = 1,
                 Format = Format.B8G8R8A8_UNorm,
                 SampleDescription = new SampleDescription(1, 0),
-                Usage = ResourceUsage.Immutable,
-                BindFlags = BindFlags.ShaderResource
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.ShaderResource | BindFlags.RenderTarget,
+                MiscFlags = ResourceOptionFlags.GenerateMips
             };
+            using var winTex = gpu.D3DDevice.CreateTexture2D(winTexDesc);
             unsafe
             {
                 fixed (byte* ptr = snapshot.BgraPixels)
-                    winTex = gpu.D3DDevice.CreateTexture2D(winTexDesc, new SubresourceData(ptr, snapshot.Width * 4));
+                    gpu.D3DContext.UpdateSubresource(winTex, 0, null, (nint)ptr, snapshot.Width * 4, 0);
             }
-            using var _winTexScope = winTex;
             using var winSrv = gpu.D3DDevice.CreateShaderResourceView(winTex);
+            gpu.D3DContext.GenerateMips(winSrv);
 
             using var outTex = gpu.D3DDevice.CreateTexture2D(new Texture2DDescription
             {
@@ -421,7 +440,7 @@ public sealed class GenieOverlayWindow : Form
             ctx.IASetInputLayout(null);
             ctx.VSSetShader(gpu.GenieVertexShader);
             ctx.PSSetShader(gpu.GeniePixelShader);
-            ctx.PSSetSampler(0, gpu.LinearClampSampler);
+            ctx.PSSetSampler(0, gpu.AnisoClampSampler);
             ctx.OMSetBlendState(gpu.PremultipliedBlendState);
 
             int edge = dockPos switch { DockPosition.Left => 1, DockPosition.Right => 2, _ => 0 };

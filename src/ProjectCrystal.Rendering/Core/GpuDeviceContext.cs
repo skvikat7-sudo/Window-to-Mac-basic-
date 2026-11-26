@@ -30,6 +30,7 @@ public sealed class GpuDeviceContext : IDisposable
     public ID3D11VertexShader GenieVertexShader { get; }
     public ID3D11PixelShader GeniePixelShader { get; }
     public ID3D11SamplerState LinearClampSampler { get; }
+    public ID3D11SamplerState AnisoClampSampler { get; }
     public ID3D11Buffer GlassConstantBuffer { get; }
     public ID3D11Buffer GenieConstantBuffer { get; }
     public ID3D11BlendState PremultipliedBlendState { get; }
@@ -91,6 +92,18 @@ public sealed class GpuDeviceContext : IDisposable
             AddressV = TextureAddressMode.Clamp,
             AddressW = TextureAddressMode.Clamp,
             MaxAnisotropy = 1,
+            ComparisonFunc = ComparisonFunction.Never,
+            MinLOD = 0,
+            MaxLOD = float.MaxValue
+        });
+
+        AnisoClampSampler = D3DDevice.CreateSamplerState(new SamplerDescription
+        {
+            Filter = Vortice.Direct3D11.Filter.Anisotropic,
+            AddressU = TextureAddressMode.Clamp,
+            AddressV = TextureAddressMode.Clamp,
+            AddressW = TextureAddressMode.Clamp,
+            MaxAnisotropy = 8,
             ComparisonFunc = ComparisonFunction.Never,
             MinLOD = 0,
             MaxLOD = float.MaxValue
@@ -225,6 +238,7 @@ public sealed class GpuDeviceContext : IDisposable
             GeniePixelShader.Dispose();
             GenieVertexShader.Dispose();
             GlassConstantBuffer.Dispose();
+            AnisoClampSampler.Dispose();
             LinearClampSampler.Dispose();
             GlassPixelShader.Dispose();
             GlassVertexShader.Dispose();

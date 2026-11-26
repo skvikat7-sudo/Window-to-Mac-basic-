@@ -42,11 +42,15 @@ public static class WindowSnapshotService
             if (!TryGetRenderBounds(hwnd, out Rectangle rect))
                 return null;
 
+            bool isCloaked = Win32Interop.DwmGetWindowAttribute(hwnd, Win32Interop.DWMWA_CLOAKED, out int cloakedVal, sizeof(int)) == 0 && cloakedVal != 0;
+            byte[]? pixels = null;
             int w = Math.Clamp(rect.Width, 16, 3840);
             int h = Math.Clamp(rect.Height, 16, 2160);
 
-            byte[]? pixels = CaptureViaGdi(hwnd, rect, w, h, allowScreenFallback);
-            if (pixels == null && allowScreenFallback && wgcFallback != null
+            // 1. Prefer direct 1:1 GPU framebuffer crop via WGC for visible uncloaked windows
+            //    (prevents Chromium/WinUI3 PrintWindow GDI scaling blur)
+            if (allowScreenFallback && !isCloaked && wgcFallback != null
+                && wgcFallback.IsLiveCaptureActive
                 && Win32Interop.IsWindowVisible(hwnd) && !Win32Interop.IsIconic(hwnd))
             {
                 var clamped = new Rectangle(
@@ -66,6 +70,8 @@ public static class WindowSnapshotService
                 }
             }
 
+            // 2. Fallback to PrintWindow (works even while cloaked) / BitBlt
+            pixels ??= CaptureViaGdi(hwnd, rect, w, h, allowScreenFallback && !isCloaked);
             if (pixels == null)
                 return null;
 

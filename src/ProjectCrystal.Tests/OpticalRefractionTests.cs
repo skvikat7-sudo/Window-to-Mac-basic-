@@ -96,5 +96,13 @@ public sealed class OpticalRefractionTests
         Assert.NotNull(gpu.GeniePixelShader);
         Assert.NotNull(gpu.GenieConstantBuffer);
         Assert.NotNull(gpu.PremultipliedBlendState);
+        Assert.NotNull(gpu.AnisoClampSampler);
+
+        byte[] dummy = new byte[256 * 256 * 4];
+        Array.Fill(dummy, (byte)200);
+        var snap = new ProjectCrystal.Native.Capture.WindowSnapshot(0, dummy, 256, 256, new Rectangle(200, 100, 256, 256), DateTime.UtcNow);
+        byte[] rendered = ProjectCrystal.Rendering.UI.GenieOverlayWindow.RenderOffscreenSampleBgra(
+            gpu, 800, 600, snap, new Rectangle(370, 520, 50, 50), ProjectCrystal.Core.Configuration.DockPosition.Bottom, 0.45f);
+        Assert.Equal(800 * 600 * 4, rendered.Length);
     }
 }

@@ -76,6 +76,7 @@ public sealed class ShellCoordinator : IDisposable
     private readonly WindowLifecycleMonitor _lifecycleMonitor = new();
     private readonly Dictionary<nint, DateTime> _suppressedLifecycleHwnds = new();
     private readonly Dictionary<nint, WindowInfo> _trackedWindows = new();
+    private readonly HashSet<nint> _transitionsDisabledHwnds = new();
     private readonly List<PendingGenieLaunch> _pendingGenieLaunches = new();
     private readonly Control _uiMarshaler = new();
 
@@ -429,7 +430,10 @@ public sealed class ShellCoordinator : IDisposable
 
             _trackedWindows.Clear();
             foreach (var w in openWins)
+            {
                 _trackedWindows[w.Handle] = w;
+                EnsureDwmTransitionSuppressed(w.Handle);
+            }
 
             if (!_safeMode)
             {
@@ -812,32 +816,38 @@ public sealed class ShellCoordinator : IDisposable
         return true;
     }
 
+    private void EnsureDwmTransitionSuppressed(nint hwnd)
+    {
+        if (hwnd == 0 || _safeMode || !_transitionsDisabledHwnds.Add(hwnd)) return;
+        Win32Interop.SetWindowTransitionsDisabled(hwnd, true);
+    }
+
     private void StartLaunchEmergeSequence(nint hwnd, Rectangle iconRect)
     {
         if (_genieOverlay == null || hwnd == 0) return;
-        PeekDockForGenie();
+        EnsureDwmTransitionSuppressed(hwnd);
         Win32Interop.SetWindowCloaked(hwnd, true);
-        _ = Task.Delay(95).ContinueWith(_ =>
+        _ = Task.Delay(75).ContinueWith(_ =>
         {
             if (_uiMarshaler.IsDisposed) return;
             _uiMarshaler.BeginInvoke(() =>
             {
                 if (!Win32Interop.IsWindow(hwnd)) return;
+                // Only use cloaked PrintWindow — never uncloak-then-recloak on top of an already open window
                 var snap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: false);
                 if (snap == null)
                 {
-                    // Some GPU/Chromium apps don't paint while cloaked: uncloak briefly, grab WGC/screen snapshot, then Genie Emerge
-                    Win32Interop.SetWindowCloaked(hwnd, false);
-                    _ = Task.Delay(60).ContinueWith(__ =>
+                    _ = Task.Delay(75).ContinueWith(__ =>
                     {
                         if (_uiMarshaler.IsDisposed) return;
                         _uiMarshaler.BeginInvoke(() =>
                         {
-                            var postSnap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: true, wgcFallback: _backdrop);
-                            if (postSnap != null)
+                            if (!Win32Interop.IsWindow(hwnd)) return;
+                            var retrySnap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: false);
+                            if (retrySnap != null)
                             {
-                                Win32Interop.SetWindowCloaked(hwnd, true);
-                                _genieOverlay.PlayGenieEmerge(postSnap, iconRect, _configMgr.Current.Dock.Position, () =>
+                                PeekDockForGenie();
+                                _genieOverlay.PlayGenieEmerge(retrySnap, iconRect, _configMgr.Current.Dock.Position, () =>
                                 {
                                     Win32Interop.SetWindowCloaked(hwnd, false);
                                     Win32Interop.SetForegroundWindow(hwnd);
@@ -845,6 +855,7 @@ public sealed class ShellCoordinator : IDisposable
                             }
                             else
                             {
+                                Win32Interop.SetWindowCloaked(hwnd, false);
                                 Win32Interop.SetForegroundWindow(hwnd);
                             }
                         });
@@ -852,6 +863,7 @@ public sealed class ShellCoordinator : IDisposable
                     return;
                 }
 
+                PeekDockForGenie();
                 _genieOverlay.PlayGenieEmerge(snap, iconRect, _configMgr.Current.Dock.Position, () =>
                 {
                     Win32Interop.SetWindowCloaked(hwnd, false);
@@ -864,10 +876,11 @@ public sealed class ShellCoordinator : IDisposable
     private void MinimizeWindowWithGenie(nint hwnd, Rectangle? explicitIconRect = null)
     {
         if (hwnd == 0) return;
-        SuppressLifecycleEvents(hwnd);
+        SuppressLifecycleEvents(hwnd, 1800);
+        EnsureDwmTransitionSuppressed(hwnd);
 
         var snap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: true, wgcFallback: _backdrop)
-                   ?? WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(10));
+                   ?? WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(12));
         var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd)
                       ?? (_trackedWindows.TryGetValue(hwnd, out var tracked) ? tracked : null);
         Rectangle iconRect = explicitIconRect ?? ResolveDockIconRect(hwnd, winInfo?.ExecutablePath ?? winInfo?.ProcessName, winInfo?.Title);
@@ -883,7 +896,8 @@ public sealed class ShellCoordinator : IDisposable
     private void RestoreWindowWithGenie(nint hwnd, Rectangle? explicitIconRect = null)
     {
         if (hwnd == 0) return;
-        SuppressLifecycleEvents(hwnd, 1500);
+        SuppressLifecycleEvents(hwnd, 1800);
+        EnsureDwmTransitionSuppressed(hwnd);
 
         var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd)
                       ?? (_trackedWindows.TryGetValue(hwnd, out var tracked) ? tracked : null);
@@ -899,17 +913,22 @@ public sealed class ShellCoordinator : IDisposable
         Win32Interop.SetWindowCloaked(hwnd, true);
         Win32Interop.ShowWindow(hwnd, Win32Interop.SW_RESTORE);
 
-        _ = Task.Delay(50).ContinueWith(_ =>
+        _ = Task.Delay(45).ContinueWith(_ =>
         {
             if (_uiMarshaler.IsDisposed) return;
             _uiMarshaler.BeginInvoke(() =>
             {
-                var snap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: false)
-                           ?? WindowSnapshotService.GetCached(hwnd, TimeSpan.FromMinutes(15));
+                // Prefer crisp pre-minimize WGC snapshot when available, else capture via PrintWindow
+                var snap = WindowSnapshotService.GetCached(hwnd, TimeSpan.FromMinutes(15))
+                           ?? WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: false);
                 if (snap != null)
                 {
-                    if (WindowSnapshotService.TryGetRenderBounds(hwnd, out var liveBounds) && snap.ScreenBounds != liveBounds)
-                        snap = snap with { ScreenBounds = liveBounds };
+                    if (WindowSnapshotService.TryGetRenderBounds(hwnd, out var liveBounds)
+                        && Math.Abs(liveBounds.Width - snap.Width) <= 24
+                        && Math.Abs(liveBounds.Height - snap.Height) <= 24)
+                    {
+                        snap = snap with { ScreenBounds = new Rectangle(Math.Max(0, liveBounds.X), Math.Max(0, liveBounds.Y), snap.Width, snap.Height) };
+                    }
 
                     _genieOverlay.PlayGenieEmerge(snap, iconRect, _configMgr.Current.Dock.Position, () =>
                     {
@@ -929,10 +948,11 @@ public sealed class ShellCoordinator : IDisposable
     private void CloseWindowWithGenie(nint hwnd, Rectangle? explicitIconRect = null)
     {
         if (hwnd == 0) return;
-        SuppressLifecycleEvents(hwnd, 1500);
+        SuppressLifecycleEvents(hwnd, 1800);
+        EnsureDwmTransitionSuppressed(hwnd);
 
         var snap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: true, wgcFallback: _backdrop)
-                   ?? WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(10));
+                   ?? WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(12));
         var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd)
                       ?? (_trackedWindows.TryGetValue(hwnd, out var tracked) ? tracked : null);
         Rectangle iconRect = explicitIconRect ?? ResolveDockIconRect(hwnd, winInfo?.ExecutablePath ?? winInfo?.ProcessName, winInfo?.Title);
@@ -959,6 +979,7 @@ public sealed class ShellCoordinator : IDisposable
     {
         nint targetHwnd = hwnd != 0 ? hwnd : _windowMgr.GetForegroundExternalWindow()?.Handle ?? 0;
         if (targetHwnd == 0) return;
+        EnsureDwmTransitionSuppressed(targetHwnd);
 
         var beforeSnap = (_genieOverlay != null && !_safeMode)
             ? WindowSnapshotService.CaptureWindow(targetHwnd, allowScreenFallback: true, wgcFallback: _backdrop)
@@ -970,7 +991,8 @@ public sealed class ShellCoordinator : IDisposable
         bool snapped = _windowMgr.SnapWindow(targetHwnd, target, 12, 12);
         if (snapped && beforeSnap != null && WindowSnapshotService.TryGetRenderBounds(targetHwnd, out var newRect) && _genieOverlay != null)
         {
-            _genieOverlay.PlayWindowMorph(beforeSnap, newRect, () =>
+            var alignedRect = new Rectangle(Math.Max(0, newRect.X), Math.Max(0, newRect.Y), Math.Min(Screen.FromHandle(targetHwnd).Bounds.Width, newRect.Width), Math.Min(Screen.FromHandle(targetHwnd).Bounds.Height, newRect.Height));
+            _genieOverlay.PlayWindowMorph(beforeSnap, alignedRect, () =>
             {
                 Win32Interop.SetWindowCloaked(targetHwnd, false);
                 Win32Interop.SetForegroundWindow(targetHwnd);
@@ -989,6 +1011,7 @@ public sealed class ShellCoordinator : IDisposable
         if (winInfo == null || winInfo.IsMinimized || winInfo.Width < 100 || winInfo.Height < 80) return;
 
         _trackedWindows[hwnd] = winInfo;
+        EnsureDwmTransitionSuppressed(hwnd);
         foreach (var d in _docks) d.MarkDirty();
 
         _ = Task.Delay(140).ContinueWith(_ =>
@@ -1001,6 +1024,8 @@ public sealed class ShellCoordinator : IDisposable
     private void OnExternalMinimizeStarted(nint hwnd)
     {
         if (IsLifecycleSuppressed(hwnd) || _genieOverlay == null || _safeMode) return;
+        SuppressLifecycleEvents(hwnd, 1800);
+        EnsureDwmTransitionSuppressed(hwnd);
         var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd)
                       ?? (_trackedWindows.TryGetValue(hwnd, out var tracked) ? tracked : null);
         if (winInfo == null) return;
@@ -1017,6 +1042,8 @@ public sealed class ShellCoordinator : IDisposable
     private void OnExternalMinimizeEnded(nint hwnd)
     {
         if (IsLifecycleSuppressed(hwnd) || _genieOverlay == null || _safeMode) return;
+        SuppressLifecycleEvents(hwnd, 1800);
+        EnsureDwmTransitionSuppressed(hwnd);
         var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd)
                       ?? (_trackedWindows.TryGetValue(hwnd, out var tracked) ? tracked : null);
         if (winInfo == null) return;
@@ -1025,11 +1052,14 @@ public sealed class ShellCoordinator : IDisposable
                    ?? WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: false);
         if (snap == null) return;
 
-        if (WindowSnapshotService.TryGetRenderBounds(hwnd, out var liveBounds))
-            snap = snap with { ScreenBounds = liveBounds };
+        if (WindowSnapshotService.TryGetRenderBounds(hwnd, out var liveBounds)
+            && Math.Abs(liveBounds.Width - snap.Width) <= 24
+            && Math.Abs(liveBounds.Height - snap.Height) <= 24)
+        {
+            snap = snap with { ScreenBounds = new Rectangle(Math.Max(0, liveBounds.X), Math.Max(0, liveBounds.Y), snap.Width, snap.Height) };
+        }
 
         PeekDockForGenie();
-        SuppressLifecycleEvents(hwnd, 1000);
         Win32Interop.SetWindowCloaked(hwnd, true);
         Rectangle iconRect = ResolveDockIconRect(hwnd, winInfo.ExecutablePath ?? winInfo.ProcessName, winInfo.Title);
         _genieOverlay.PlayGenieEmerge(snap, iconRect, _configMgr.Current.Dock.Position, () =>
@@ -1057,13 +1087,14 @@ public sealed class ShellCoordinator : IDisposable
 
     private void OnExternalWindowDestroyed(nint hwnd)
     {
+        bool hadNoTrans = _transitionsDisabledHwnds.Remove(hwnd);
         if (IsLifecycleSuppressed(hwnd) || _genieOverlay == null || _safeMode) return;
         if (!_trackedWindows.TryGetValue(hwnd, out var winInfo)) return;
         _trackedWindows.Remove(hwnd);
 
         var snap = WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(15));
         WindowSnapshotService.Invalidate(hwnd);
-        if (snap == null) return;
+        if (!hadNoTrans || snap == null) return;
 
         PeekDockForGenie();
         Rectangle iconRect = ResolveDockIconRect(hwnd, winInfo.ExecutablePath ?? winInfo.ProcessName, winInfo.Title);
@@ -1096,6 +1127,12 @@ public sealed class ShellCoordinator : IDisposable
         CrystalLogger.Info("Shell", "Safe Exit requested; restoring Windows taskbar & work area.");
         _shellSvc.UnregisterAppBar();
         _shellSvc.RestoreTaskbarIfBackedUp();
+        foreach (nint h in _transitionsDisabledHwnds)
+        {
+            if (Win32Interop.IsWindow(h))
+                Win32Interop.SetWindowTransitionsDisabled(h, false);
+        }
+        _transitionsDisabledHwnds.Clear();
         _configMgr.SaveImmediate();
         _recoveryGuard.EndSessionCleanly();
         Application.Exit();
@@ -1460,6 +1497,12 @@ public sealed class ShellCoordinator : IDisposable
 
         _shellSvc.UnregisterAppBar();
         _shellSvc.RestoreTaskbarIfBackedUp();
+        foreach (nint h in _transitionsDisabledHwnds)
+        {
+            if (Win32Interop.IsWindow(h))
+                Win32Interop.SetWindowTransitionsDisabled(h, false);
+        }
+        _transitionsDisabledHwnds.Clear();
 
         _trayIcon.Visible = false;
         _trayIcon.Dispose();

@@ -196,7 +196,7 @@ float4 PS(VSOut input) : SV_TARGET
     float funnelMotion = sin(progress * 3.14159265);
     col += float3(0.92, 0.96, 1.0) * (centerHighlight * funnelMotion * sheenAmt * 0.09);
 
-    float endFade = 1.0 - smoothstep(0.84, 1.0, progress);
+    float endFade = 1.0 - smoothstep(0.90, 1.0, progress);
     float a = mask * endFade * globalOp;
     float outA = max(a, shMask * (1.0 - a));
     return float4(col * a, outA);

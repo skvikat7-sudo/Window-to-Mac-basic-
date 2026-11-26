@@ -978,19 +978,25 @@ public sealed class DockWindow : GlassWindowBase
             }
         }
 
-        // Fallback to center of dock capsule (or monitor bottom-center if hidden)
+        // Fallback to center of revealed dock capsule
         int iconSz = Math.Max(40, (int)Config.Dock.IconSize);
         if (_dockCapsuleRect.Width > 10 && _dockCapsuleRect.Height > 10)
         {
-            int cx = Left + (int)(_dockCapsuleRect.X + _dockCapsuleRect.Width * 0.5f - iconSz * 0.5f);
-            int cy = Top + (int)(_dockCapsuleRect.Y + _dockCapsuleRect.Height * 0.5f - iconSz * 0.5f);
+            int cx = Config.Dock.Position == DockPosition.Left
+                ? _monitorBounds.Left + 21
+                : (Config.Dock.Position == DockPosition.Right
+                    ? _monitorBounds.Right - 21 - iconSz
+                    : Left + (int)(_dockCapsuleRect.X + _dockCapsuleRect.Width * 0.5f - iconSz * 0.5f));
+            int cy = Config.Dock.Position == DockPosition.Bottom
+                ? _monitorBounds.Bottom - 21 - iconSz
+                : Top + (int)(_dockCapsuleRect.Y + _dockCapsuleRect.Height * 0.5f - iconSz * 0.5f);
             return new Rectangle(cx, cy, iconSz, iconSz);
         }
         return Config.Dock.Position switch
         {
-            DockPosition.Left => new Rectangle(_monitorBounds.Left + 16, _monitorBounds.Top + _monitorBounds.Height / 2 - iconSz / 2, iconSz, iconSz),
-            DockPosition.Right => new Rectangle(_monitorBounds.Right - 16 - iconSz, _monitorBounds.Top + _monitorBounds.Height / 2 - iconSz / 2, iconSz, iconSz),
-            _ => new Rectangle(_monitorBounds.Left + _monitorBounds.Width / 2 - iconSz / 2, _monitorBounds.Bottom - 20 - iconSz, iconSz, iconSz)
+            DockPosition.Left => new Rectangle(_monitorBounds.Left + 21, _monitorBounds.Top + _monitorBounds.Height / 2 - iconSz / 2, iconSz, iconSz),
+            DockPosition.Right => new Rectangle(_monitorBounds.Right - 21 - iconSz, _monitorBounds.Top + _monitorBounds.Height / 2 - iconSz / 2, iconSz, iconSz),
+            _ => new Rectangle(_monitorBounds.Left + _monitorBounds.Width / 2 - iconSz / 2, _monitorBounds.Bottom - 21 - iconSz, iconSz, iconSz)
         };
     }
 
@@ -1000,9 +1006,23 @@ public sealed class DockWindow : GlassWindowBase
             return GetIconScreenRectForWindow(0);
 
         var slot = _renderedSlots[idx];
-        int sz = Math.Max(28, (int)MathF.Round(slot.Size));
-        int sx = Left + (int)MathF.Round(slot.CenterX - sz * 0.5f);
-        int sy = Top + (int)MathF.Round(slot.CenterY - sz * 0.5f);
+        int sz = Math.Max(36, (int)MathF.Round(Config.Dock.IconSize));
+        int sx, sy;
+        if (Config.Dock.Position == DockPosition.Left)
+        {
+            sx = _monitorBounds.Left + 21;
+            sy = Math.Clamp(Top + (int)MathF.Round(slot.CenterY - sz * 0.5f), _monitorBounds.Top + 12, _monitorBounds.Bottom - sz - 12);
+        }
+        else if (Config.Dock.Position == DockPosition.Right)
+        {
+            sx = _monitorBounds.Right - 21 - sz;
+            sy = Math.Clamp(Top + (int)MathF.Round(slot.CenterY - sz * 0.5f), _monitorBounds.Top + 12, _monitorBounds.Bottom - sz - 12);
+        }
+        else
+        {
+            sx = Math.Clamp(Left + (int)MathF.Round(slot.CenterX - sz * 0.5f), _monitorBounds.Left + 12, _monitorBounds.Right - sz - 12);
+            sy = _monitorBounds.Bottom - 21 - sz;
+        }
         return new Rectangle(sx, sy, sz, sz);
     }
 

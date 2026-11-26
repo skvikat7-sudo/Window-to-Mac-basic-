@@ -43,6 +43,7 @@ public static class Win32Interop
     public const int WM_NCHITTEST = 0x0084;
     public const int HTTRANSPARENT = -1;
 
+    public const int DWMWA_TRANSITIONS_FORCEDISABLED = 3;
     public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
     public const int DWMWA_EXCLUDED_FROM_PEEK = 12;
     public const int DWMWA_CLOAK = 13;
@@ -56,6 +57,7 @@ public static class Win32Interop
     public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
     public const uint EVENT_SYSTEM_MINIMIZESTART = 0x0016;
     public const uint EVENT_SYSTEM_MINIMIZEEND = 0x0017;
+    public const uint EVENT_OBJECT_CREATE = 0x8000;
     public const uint EVENT_OBJECT_DESTROY = 0x8001;
     public const uint EVENT_OBJECT_SHOW = 0x8002;
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
@@ -449,5 +451,12 @@ public static class Win32Interop
         if (hwnd == 0) return;
         int val = cloaked ? 1 : 0;
         DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, ref val, sizeof(int));
+    }
+
+    public static void SetWindowTransitionsDisabled(nint hwnd, bool disabled)
+    {
+        if (hwnd == 0) return;
+        int val = disabled ? 1 : 0;
+        DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, ref val, sizeof(int));
     }
 }
