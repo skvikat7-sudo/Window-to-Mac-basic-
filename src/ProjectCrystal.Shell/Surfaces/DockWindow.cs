@@ -502,7 +502,7 @@ public sealed class DockWindow : GlassWindowBase
 
             if (_bounceSprings.TryGetValue(slot.Item.Id, out var bp))
             {
-                moving |= bp.Step(dtSeconds, 380f * speed, 16f, instant);
+                moving |= bp.Step(dtSeconds, 360f * speed, 11f, instant);
                 _bounceSprings[slot.Item.Id] = bp;
             }
         }
@@ -609,7 +609,7 @@ public sealed class DockWindow : GlassWindowBase
             {
                 float sz = scaledSizes[i];
                 float centerX = cur + sz * 0.5f;
-                float bounce = _bounceSprings.TryGetValue(snapshot[i].Id, out var bp) ? bp.Value : 0f;
+                float bounce = _bounceSprings.TryGetValue(snapshot[i].Id, out var bp) ? MathF.Abs(bp.Value) : 0f;
                 float lift = (sz - baseSize) * 0.60f + bounce;
                 float centerY = cyBottom - 11f - baseSize * 0.5f - lift;
                 var hit = new RectangleF(cur - gap * 0.4f, centerY - sz * 0.65f, sz + gap * 0.8f, sz + 22f);
@@ -629,7 +629,7 @@ public sealed class DockWindow : GlassWindowBase
             {
                 float sz = scaledSizes[i];
                 float centerY = cur + sz * 0.5f;
-                float bounce = _bounceSprings.TryGetValue(snapshot[i].Id, out var bp) ? bp.Value : 0f;
+                float bounce = _bounceSprings.TryGetValue(snapshot[i].Id, out var bp) ? MathF.Abs(bp.Value) : 0f;
                 float lift = (sz - baseSize) * 0.60f + bounce;
                 float centerX = isLeft
                     ? (capX + capsuleThickness * 0.5f + lift)
@@ -806,7 +806,7 @@ public sealed class DockWindow : GlassWindowBase
     private void TriggerBounce(string itemId)
     {
         if (ShouldReduceMotion()) return;
-        var sp = new SpringFloat(0f) { Velocity = 190f, Target = 0f };
+        var sp = new SpringFloat(0f) { Velocity = 240f, Target = 0f };
         _bounceSprings[itemId] = sp;
         MarkDirty();
     }

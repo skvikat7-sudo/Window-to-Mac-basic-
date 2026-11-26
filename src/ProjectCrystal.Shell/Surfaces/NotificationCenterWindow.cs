@@ -38,6 +38,8 @@ public sealed class NotificationCenterWindow : GlassWindowBase
         new() { Id = "t3", Title = "Review window spaces", TimeTag = "15m", Completed = false }
     };
 
+    protected override PanelMotionPreset MotionPreset => PanelMotionPreset.MacSlideRight;
+
     public NotificationCenterWindow(
         GpuDeviceContext gpu,
         ConfigManager configMgr,

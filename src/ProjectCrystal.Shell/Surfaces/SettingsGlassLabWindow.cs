@@ -33,6 +33,8 @@ public sealed class SettingsGlassLabWindow : GlassWindowBase
     private SpringFloat _activeTabY = new(82f);
     private readonly Dictionary<string, SpringFloat> _toggleSprings = new(StringComparer.OrdinalIgnoreCase);
 
+    protected override PanelMotionPreset MotionPreset => PanelMotionPreset.MacWindowPop;
+
     private static readonly string[] Tabs =
     {
         "Glass Lab", "Appearance", "Dock", "Menu Bar", "Widgets",

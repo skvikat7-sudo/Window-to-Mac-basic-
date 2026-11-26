@@ -351,6 +351,37 @@ public sealed class DockAndGlassRegressionTests
     }
 
     [Fact]
+    public void AnimatedPanelMotion_AllMacPresets_PopUpAndPopDownCleanly()
+    {
+        foreach (PanelMotionPreset preset in Enum.GetValues<PanelMotionPreset>())
+        {
+            var motion = new AnimatedPanelMotion();
+            motion.SetPreset(preset);
+            motion.BeginOpen();
+
+            bool stillMoving = true;
+            for (int i = 0; i < 80 && stillMoving; i++)
+            {
+                stillMoving = motion.Step(0.016f, speedScale: 1.0f, instant: false);
+                Assert.InRange(motion.Opacity, 0f, 1.001f);
+                Assert.InRange(motion.Scale, 0.80f, 1.10f);
+            }
+            Assert.False(stillMoving, $"Preset {preset} failed to settle on open");
+            Assert.True(motion.Opacity >= 0.99f);
+            Assert.InRange(motion.Scale, 0.99f, 1.01f);
+
+            bool closed = false;
+            motion.BeginClose(() => closed = true);
+            stillMoving = true;
+            for (int i = 0; i < 80 && (stillMoving || !closed); i++)
+                stillMoving = motion.Step(0.016f, speedScale: 1.0f, instant: false);
+
+            Assert.True(closed, $"Preset {preset} did not invoke onClosed");
+            Assert.True(motion.Opacity <= 0.03f);
+        }
+    }
+
+    [Fact]
     public void SettingsGlassLabWindow_ShowAndFocus_OpensTopMostAndRendersCleanly()
     {
         Exception? threadEx = null;

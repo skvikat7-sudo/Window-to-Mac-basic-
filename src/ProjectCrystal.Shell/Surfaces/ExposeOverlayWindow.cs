@@ -24,6 +24,8 @@ public sealed class ExposeOverlayWindow : GlassWindowBase
     private readonly List<(RectangleF Rect, Action OnClick)> _headerButtons = new();
     private int _hoverIdx = -1;
 
+    protected override PanelMotionPreset MotionPreset => PanelMotionPreset.MacMissionControl;
+
     public ExposeOverlayWindow(
         GpuDeviceContext gpu,
         ConfigManager configMgr,

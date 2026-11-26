@@ -28,6 +28,8 @@ public sealed class ContextMenuWindow : GlassWindowBase
     private const int ItemH = 32;
     private const int SepH = 10;
 
+    protected override PanelMotionPreset MotionPreset => PanelMotionPreset.MacContextMenu;
+
     public ContextMenuWindow(GpuDeviceContext gpu, ConfigManager configMgr, IDesktopBackdropSource? backdrop)
         : base(gpu, configMgr, backdrop, noActivate: false, topMost: true)
     {

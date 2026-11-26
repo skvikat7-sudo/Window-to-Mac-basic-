@@ -133,10 +133,14 @@ public abstract class GlassWindowBase : Form
         MarkDirty();
     }
 
-    public void ShowAnimated(float startSlideY = -12f)
+    protected virtual PanelMotionPreset MotionPreset => PanelMotionPreset.Default;
+
+    public void ShowAnimated(float? startSlideY = null)
     {
         if (!IsHandleCreated)
             _ = Handle;
+
+        PanelMotion.SetPreset(MotionPreset);
 
         if (ShouldReduceMotion())
             PanelMotion.SnapOpen();
@@ -197,11 +201,12 @@ public abstract class GlassWindowBase : Form
         try
         {
             float sc = PanelMotion.Scale;
+            float ox = PanelMotion.OffsetX;
             float oy = PanelMotion.OffsetY;
-            if (MathF.Abs(sc - 1f) > 0.001f || MathF.Abs(oy) > 0.1f)
+            if (MathF.Abs(sc - 1f) > 0.001f || MathF.Abs(ox) > 0.1f || MathF.Abs(oy) > 0.1f)
             {
-                var center = new Vector2(Width * 0.5f, Height * 0.5f);
-                d2d.Transform = Matrix3x2.CreateScale(sc, sc, center) * Matrix3x2.CreateTranslation(0f, oy);
+                var anchor = new Vector2(Width * PanelMotion.AnchorX, Height * PanelMotion.AnchorY);
+                d2d.Transform = Matrix3x2.CreateScale(sc, sc, anchor) * Matrix3x2.CreateTranslation(ox, oy);
             }
             DrawForeground2D(d2d);
             d2d.Transform = Matrix3x2.Identity;
@@ -213,7 +218,7 @@ public abstract class GlassWindowBase : Form
         }
     }
 
-    public void HideAnimated(float endSlideY = -10f)
+    public void HideAnimated(float? endSlideY = null)
     {
         if (!Visible) return;
         if (ShouldReduceMotion())
@@ -221,6 +226,7 @@ public abstract class GlassWindowBase : Form
             Hide();
             return;
         }
+        PanelMotion.SetPreset(MotionPreset);
         PanelMotion.BeginClose(Hide, endSlideY);
         MarkDirty();
     }
@@ -324,17 +330,18 @@ public abstract class GlassWindowBase : Form
     {
         float op = PanelMotion.Opacity;
         float sc = PanelMotion.Scale;
+        float ox = PanelMotion.OffsetX;
         float oy = PanelMotion.OffsetY;
-        if (op >= 0.999f && MathF.Abs(sc - 1f) < 0.001f && MathF.Abs(oy) < 0.1f)
+        if (op >= 0.999f && MathF.Abs(sc - 1f) < 0.001f && MathF.Abs(ox) < 0.1f && MathF.Abs(oy) < 0.1f)
             return source;
 
-        float cx = Width * 0.5f;
-        float cy = Height * 0.5f;
+        float ax = Width * PanelMotion.AnchorX;
+        float ay = Height * PanelMotion.AnchorY;
         var transformed = new List<GlassShapeItem>(source.Count);
         foreach (var s in source)
         {
-            float nx = cx + (s.X - cx) * sc;
-            float ny = cy + (s.Y - cy) * sc + oy;
+            float nx = ax + (s.X - ax) * sc + ox;
+            float ny = ay + (s.Y - ay) * sc + oy;
             transformed.Add(new GlassShapeItem
             {
                 X = nx,

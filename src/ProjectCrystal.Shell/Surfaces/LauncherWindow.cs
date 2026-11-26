@@ -21,6 +21,8 @@ public sealed class LauncherWindow : GlassWindowBase
     private const int GridCols = 3;
     private const int GridMaxItems = 12;
 
+    protected override PanelMotionPreset MotionPreset => PanelMotionPreset.MacLaunchpad;
+
     private readonly InstalledAppsService _appsService;
     private readonly IconTextureRegistry _icons;
     private readonly WindowManagerService _windowMgr;

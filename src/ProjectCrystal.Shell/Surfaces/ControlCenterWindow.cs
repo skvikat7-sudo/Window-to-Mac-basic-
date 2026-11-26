@@ -42,6 +42,8 @@ public sealed class ControlCenterWindow : GlassWindowBase
     private RectangleF _brightTrackRect;
     private bool _showDevicePicker;
 
+    protected override PanelMotionPreset MotionPreset => PanelMotionPreset.MacPopover;
+
     public ControlCenterWindow(
         GpuDeviceContext gpu,
         ConfigManager configMgr,
