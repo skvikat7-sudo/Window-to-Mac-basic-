@@ -1,0 +1,21 @@
+# Build outputs
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+*.db
+*.opendb
+*.VC.db
+
+# Installer staging & temporary artifacts
+dist/payload/
+dist/installer_tmp/
+src/ProjectCrystal.Installer/payload.zip
+visual_verify/
+
+# Logs & OS files
+*.log
+Thumbs.db
+Desktop.ini
+.DS_Store
