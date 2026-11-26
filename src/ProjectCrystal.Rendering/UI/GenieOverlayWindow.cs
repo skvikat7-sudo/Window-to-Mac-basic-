@@ -221,12 +221,10 @@ public sealed class GenieOverlayWindow : Form
         _lastTickUtc = DateTime.UtcNow;
         RenderFrame(commitDComp: true);
         if (!Visible)
-        {
             Show();
-            Win32Interop.SetWindowPos(
-                Handle, Win32Interop.HWND_TOPMOST, Left, Top, Width, Height,
-                Win32Interop.SWP_NOACTIVATE | Win32Interop.SWP_SHOWWINDOW);
-        }
+        Win32Interop.SetWindowPos(
+            Handle, Win32Interop.HWND_TOPMOST, Left, Top, Width, Height,
+            Win32Interop.SWP_NOACTIVATE | Win32Interop.SWP_SHOWWINDOW);
     }
 
     public bool TickAndRenderIfNeeded(bool commitDComp = true)

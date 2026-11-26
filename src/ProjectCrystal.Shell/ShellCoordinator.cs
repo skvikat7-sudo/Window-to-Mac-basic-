@@ -131,6 +131,11 @@ public sealed class ShellCoordinator : IDisposable
         _hotkeyWin.HotkeyPressed += OnHotkeyPressed;
         _ = _uiMarshaler.Handle;
 
+        _lifecycleMonitor.WindowForegroundChanged += hwnd =>
+        {
+            if (!_uiMarshaler.IsDisposed)
+                _uiMarshaler.BeginInvoke(() => OnExternalForegroundChanged(hwnd));
+        };
         _lifecycleMonitor.WindowMinimizeStarted += hwnd =>
         {
             if (!_uiMarshaler.IsDisposed)
@@ -975,6 +980,22 @@ public sealed class ShellCoordinator : IDisposable
         {
             Win32Interop.SetWindowCloaked(targetHwnd, false);
         }
+    }
+
+    private void OnExternalForegroundChanged(nint hwnd)
+    {
+        if (hwnd == 0 || _safeMode) return;
+        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd);
+        if (winInfo == null || winInfo.IsMinimized || winInfo.Width < 100 || winInfo.Height < 80) return;
+
+        _trackedWindows[hwnd] = winInfo;
+        foreach (var d in _docks) d.MarkDirty();
+
+        _ = Task.Delay(140).ContinueWith(_ =>
+        {
+            if (!_disposed && Win32Interop.IsWindow(hwnd) && !Win32Interop.IsIconic(hwnd))
+                WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: true, wgcFallback: _backdrop);
+        });
     }
 
     private void OnExternalMinimizeStarted(nint hwnd)

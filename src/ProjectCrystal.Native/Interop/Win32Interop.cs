@@ -53,6 +53,7 @@ public static class Win32Interop
     public const uint PW_RENDERFULLCONTENT = 0x00000002;
     public const uint SRCCOPY = 0x00CC0020;
 
+    public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
     public const uint EVENT_SYSTEM_MINIMIZESTART = 0x0016;
     public const uint EVENT_SYSTEM_MINIMIZEEND = 0x0017;
     public const uint EVENT_OBJECT_DESTROY = 0x8001;

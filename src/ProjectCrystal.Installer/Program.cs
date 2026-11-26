@@ -69,7 +69,23 @@ internal static class Program
             if (stream != null)
             {
                 using var archive = new ZipArchive(stream, ZipArchiveMode.Read);
-                archive.ExtractToDirectory(installDir, overwriteFiles: true);
+                Exception? lastErr = null;
+                for (int attempt = 0; attempt < 6; attempt++)
+                {
+                    try
+                    {
+                        archive.ExtractToDirectory(installDir, overwriteFiles: true);
+                        lastErr = null;
+                        break;
+                    }
+                    catch (IOException ex)
+                    {
+                        lastErr = ex;
+                        StopRunningCrystal(installDir);
+                        Thread.Sleep(250);
+                    }
+                }
+                if (lastErr != null) throw lastErr;
             }
             else
             {
@@ -187,10 +203,13 @@ internal static class Program
             }
             catch { }
         }
+        bool killedAny = false;
         foreach (var proc in Process.GetProcessesByName("ProjectCrystal"))
         {
-            try { proc.Kill(); proc.WaitForExit(1500); } catch { }
+            try { proc.Kill(); proc.WaitForExit(2500); killedAny = true; } catch { }
         }
+        if (killedAny)
+            Thread.Sleep(350);
     }
 
     private static void CopyDirectory(string src, string dst)
