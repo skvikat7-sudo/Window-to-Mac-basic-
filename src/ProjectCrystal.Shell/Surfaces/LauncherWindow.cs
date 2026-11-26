@@ -23,6 +23,9 @@ public sealed class LauncherWindow : GlassWindowBase
 
     protected override PanelMotionPreset MotionPreset => PanelMotionPreset.MacLaunchpad;
 
+    public event Action<AppEntry>? LaunchAppRequested;
+    public event Action<nint>? RestoreWindowRequested;
+
     private readonly InstalledAppsService _appsService;
     private readonly IconTextureRegistry _icons;
     private readonly WindowManagerService _windowMgr;
@@ -179,9 +182,20 @@ public sealed class LauncherWindow : GlassWindowBase
             var running = FindRunningWindow(app);
             HideAnimated(-12f);
             if (running != null)
-                _windowMgr.FocusWindow(running.Handle);
+            {
+                if (running.IsMinimized && RestoreWindowRequested != null)
+                    RestoreWindowRequested(running.Handle);
+                else
+                    _windowMgr.FocusWindow(running.Handle);
+            }
+            else if (LaunchAppRequested != null)
+            {
+                LaunchAppRequested(app);
+            }
             else
+            {
                 _appsService.LaunchApp(app.LaunchTarget, app.Arguments);
+            }
         }
     }
 
@@ -320,7 +334,18 @@ public sealed class LauncherWindow : GlassWindowBase
             _catRects, _itemRects, _actionRects,
             onClearQuery: () => { _query = ""; _copiedToast = ""; ApplyFilter(); MarkDirty(); },
             onTogglePin: app => { TogglePinToDock(app); MarkDirty(); },
-            onLaunchApp: app => { HideAnimated(-12f); _appsService.LaunchApp(app.LaunchTarget, app.Arguments); },
+            onLaunchApp: app =>
+            {
+                HideAnimated(-12f);
+                var running = FindRunningWindow(app);
+                if (running != null)
+                {
+                    if (running.IsMinimized && RestoreWindowRequested != null) RestoreWindowRequested(running.Handle);
+                    else _windowMgr.FocusWindow(running.Handle);
+                }
+                else if (LaunchAppRequested != null) LaunchAppRequested(app);
+                else _appsService.LaunchApp(app.LaunchTarget, app.Arguments);
+            },
             onOpenLocation: app =>
             {
                 try

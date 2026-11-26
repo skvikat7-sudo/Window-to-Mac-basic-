@@ -12,6 +12,7 @@ public sealed class WindowLifecycleMonitor : IDisposable
     public event Action<nint>? WindowMinimizeStarted;
     public event Action<nint>? WindowMinimizeEnded;
     public event Action<nint>? WindowShown;
+    public event Action<nint>? WindowDestroyed;
 
     public WindowLifecycleMonitor()
     {
@@ -24,7 +25,7 @@ public sealed class WindowLifecycleMonitor : IDisposable
         if (_hooks.Count > 0 || _disposed) return;
         uint flags = Win32Interop.WINEVENT_OUTOFCONTEXT | Win32Interop.WINEVENT_SKIPOWNPROCESS;
         AddHook(Win32Interop.EVENT_SYSTEM_MINIMIZESTART, Win32Interop.EVENT_SYSTEM_MINIMIZEEND, flags);
-        AddHook(Win32Interop.EVENT_OBJECT_SHOW, Win32Interop.EVENT_OBJECT_SHOW, flags);
+        AddHook(Win32Interop.EVENT_OBJECT_DESTROY, Win32Interop.EVENT_OBJECT_SHOW, flags);
     }
 
     private void AddHook(uint min, uint max, uint flags)
@@ -53,6 +54,8 @@ public sealed class WindowLifecycleMonitor : IDisposable
                 WindowMinimizeEnded?.Invoke(hwnd);
             else if (eventType == Win32Interop.EVENT_OBJECT_SHOW)
                 WindowShown?.Invoke(hwnd);
+            else if (eventType == Win32Interop.EVENT_OBJECT_DESTROY)
+                WindowDestroyed?.Invoke(hwnd);
         }
         catch (Exception ex)
         {

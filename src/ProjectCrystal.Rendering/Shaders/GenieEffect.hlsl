@@ -143,11 +143,12 @@ float4 PS(VSOut input) : SV_TARGET
     float topY = lerp(wy,      targetTopY, topEase);
     float spanY = max(2.0, botY - topY);
 
-    // Funnel S-curve from window top to dock icon
-    float funnelSpan = max(48.0, targetBotY - wy);
-    float s = saturate((py - wy) / funnelSpan);
-    float sCurve = s * s * (3.0 - 2.0 * s);
-    float bend = lerp(sCurve, s * s * s, 0.22);
+    // Iconic macOS wine-glass S-curve funnel blending world funnel path with local top/bottom shoulder flare
+    float sFull = saturate((py - wy) / max(48.0, targetBotY - wy));
+    float sLocal = saturate((py - topY) / max(32.0, botY - topY));
+    float s = lerp(sFull, sLocal, 0.35);
+    float sCurve = s * s * s * (s * (s * 6.0 - 15.0) + 10.0);
+    float bend = saturate(lerp(sCurve, s * s, 0.14));
 
     float leftEdge  = lerp(wx,      ix,      bend * pinchT);
     float rightEdge = lerp(wx + ww, ix + iw, bend * pinchT);

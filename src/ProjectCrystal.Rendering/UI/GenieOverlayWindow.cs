@@ -128,17 +128,17 @@ public sealed class GenieOverlayWindow : Form
 
     public void PlayGenieCollapse(WindowSnapshot snapshot, Rectangle dockIconScreenRect, DockPosition dockPos, Action? onComplete = null)
     {
-        StartAnimation(snapshot, dockIconScreenRect, dockPos, mode: 0, isEmerge: false, durationSec: 0.40f, onComplete);
+        StartAnimation(snapshot, dockIconScreenRect, dockPos, mode: 0, isEmerge: false, durationSec: 0.48f, onComplete);
     }
 
     public void PlayGenieEmerge(WindowSnapshot snapshot, Rectangle dockIconScreenRect, DockPosition dockPos, Action? onComplete = null)
     {
-        StartAnimation(snapshot, dockIconScreenRect, dockPos, mode: 0, isEmerge: true, durationSec: 0.42f, onComplete);
+        StartAnimation(snapshot, dockIconScreenRect, dockPos, mode: 0, isEmerge: true, durationSec: 0.48f, onComplete);
     }
 
     public void PlayWindowMorph(WindowSnapshot snapshot, Rectangle targetScreenRect, Action? onComplete = null)
     {
-        StartAnimation(snapshot, targetScreenRect, DockPosition.Bottom, mode: 1, isEmerge: false, durationSec: 0.28f, onComplete);
+        StartAnimation(snapshot, targetScreenRect, DockPosition.Bottom, mode: 1, isEmerge: false, durationSec: 0.32f, onComplete);
     }
 
     private void StartAnimation(
@@ -167,13 +167,16 @@ public sealed class GenieOverlayWindow : Form
         }
 
         float speed = Math.Clamp(_configMgr.Current.Glass.AnimationSpeed, 0.4f, 2.0f);
-        float scaledDuration = Math.Clamp(durationSec / speed, 0.16f, 0.75f);
+        float scaledDuration = Math.Clamp(durationSec / MathF.Sqrt(speed), 0.30f, 0.85f);
         int edge = dockPos switch
         {
             DockPosition.Left => 1,
             DockPosition.Right => 2,
             _ => 0
         };
+
+        string kind = mode == 1 ? "Morph" : (isEmerge ? "GenieEmerge" : "GenieCollapse");
+        CrystalLogger.Info("Genie", $"Starting {kind} ({scaledDuration:F2}s): Win={snapshot.ScreenBounds} -> Target={targetScreenRect}");
 
         lock (_gpu.DeviceLock)
         {
@@ -343,6 +346,7 @@ public sealed class GenieOverlayWindow : Form
                     ctx.PSSetShaderResource(0, null!);
                 }
 
+                ctx.OMSetRenderTargets(Array.Empty<ID3D11RenderTargetView>());
                 _swapChain.Present(0, PresentFlags.None);
                 if (commitDComp)
                     _gpu.DCompDevice.Commit();
@@ -350,7 +354,115 @@ public sealed class GenieOverlayWindow : Form
         }
         catch (Exception ex)
         {
-            CrystalLogger.Debug("Genie", $"RenderFrame failed: {ex.Message}");
+            CrystalLogger.Warn("Genie", $"RenderFrame failed: {ex.Message}");
+        }
+    }
+
+    public static byte[] RenderOffscreenSampleBgra(
+        GpuDeviceContext gpu,
+        int width,
+        int height,
+        WindowSnapshot snapshot,
+        Rectangle targetScreenRect,
+        DockPosition dockPos,
+        float progress,
+        int mode = 0)
+    {
+        lock (gpu.DeviceLock)
+        {
+            ID3D11Texture2D winTex;
+            var winTexDesc = new Texture2DDescription
+            {
+                Width = snapshot.Width,
+                Height = snapshot.Height,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.B8G8R8A8_UNorm,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Immutable,
+                BindFlags = BindFlags.ShaderResource
+            };
+            unsafe
+            {
+                fixed (byte* ptr = snapshot.BgraPixels)
+                    winTex = gpu.D3DDevice.CreateTexture2D(winTexDesc, new SubresourceData(ptr, snapshot.Width * 4));
+            }
+            using var _winTexScope = winTex;
+            using var winSrv = gpu.D3DDevice.CreateShaderResourceView(winTex);
+
+            using var outTex = gpu.D3DDevice.CreateTexture2D(new Texture2DDescription
+            {
+                Width = width,
+                Height = height,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.B8G8R8A8_UNorm,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource
+            });
+            using var rtv = gpu.D3DDevice.CreateRenderTargetView(outTex);
+            using var staging = gpu.D3DDevice.CreateTexture2D(new Texture2DDescription
+            {
+                Width = width,
+                Height = height,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.B8G8R8A8_UNorm,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Staging,
+                BindFlags = BindFlags.None,
+                CPUAccessFlags = CpuAccessFlags.Read
+            });
+
+            var ctx = gpu.D3DContext;
+            ctx.OMSetRenderTargets(rtv);
+            ctx.ClearRenderTargetView(rtv, new Vortice.Mathematics.Color4(0.08f, 0.12f, 0.22f, 1f));
+            ctx.RSSetViewport(new Vortice.Mathematics.Viewport(0, 0, width, height, 0f, 1f));
+            ctx.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+            ctx.IASetInputLayout(null);
+            ctx.VSSetShader(gpu.GenieVertexShader);
+            ctx.PSSetShader(gpu.GeniePixelShader);
+            ctx.PSSetSampler(0, gpu.LinearClampSampler);
+            ctx.OMSetBlendState(gpu.PremultipliedBlendState);
+
+            int edge = dockPos switch { DockPosition.Left => 1, DockPosition.Right => 2, _ => 0 };
+            var gpuConst = new GenieConstantsGpu
+            {
+                WinRect = new Vector4(snapshot.ScreenBounds.X, snapshot.ScreenBounds.Y, snapshot.ScreenBounds.Width, snapshot.ScreenBounds.Height),
+                IconRect = new Vector4(targetScreenRect.X, targetScreenRect.Y, targetScreenRect.Width, targetScreenRect.Height),
+                OverlayParams = new Vector4(width, height, edge, progress),
+                EffectParams = new Vector4(mode, 1f, 1f, 12f)
+            };
+            var mapped = ctx.Map(gpu.GenieConstantBuffer, 0, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+            Marshal.StructureToPtr(gpuConst, mapped.DataPointer, false);
+            ctx.Unmap(gpu.GenieConstantBuffer, 0);
+
+            ctx.PSSetConstantBuffer(0, gpu.GenieConstantBuffer);
+            ctx.PSSetShaderResource(0, winSrv);
+            ctx.Draw(3, 0);
+
+            ctx.OMSetBlendState(null);
+            ctx.OMSetRenderTargets(Array.Empty<ID3D11RenderTargetView>());
+            ctx.PSSetShaderResource(0, null!);
+            ctx.CopyResource(staging, outTex);
+
+            var readMap = ctx.Map(staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+            try
+            {
+                byte[] bytes = new byte[width * height * 4];
+                unsafe
+                {
+                    byte* src = (byte*)readMap.DataPointer;
+                    for (int y = 0; y < height; y++)
+                        Marshal.Copy((nint)(src + y * readMap.RowPitch), bytes, y * width * 4, width * 4);
+                }
+                return bytes;
+            }
+            finally
+            {
+                ctx.Unmap(staging, 0);
+            }
         }
     }
 

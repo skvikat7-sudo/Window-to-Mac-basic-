@@ -65,10 +65,18 @@ public sealed class ShellCoordinator : IDisposable
     private ExposeOverlayWindow? _expose;
     private SettingsGlassLabWindow? _settingsLab;
     private ContextMenuWindow? _contextMenu;
+    private sealed record PendingGenieLaunch(
+        string AppName,
+        string ExeName,
+        Rectangle IconRect,
+        HashSet<nint> ExistingHwnds,
+        DateTime ExpiresUtc);
+
     private GenieOverlayWindow? _genieOverlay;
     private readonly WindowLifecycleMonitor _lifecycleMonitor = new();
     private readonly Dictionary<nint, DateTime> _suppressedLifecycleHwnds = new();
-    private readonly List<(string AppName, string ExeName, Rectangle IconRect, DateTime ExpiresUtc)> _pendingGenieLaunches = new();
+    private readonly Dictionary<nint, WindowInfo> _trackedWindows = new();
+    private readonly List<PendingGenieLaunch> _pendingGenieLaunches = new();
     private readonly Control _uiMarshaler = new();
 
     private readonly HotkeyMessageWindow _hotkeyWin = new();
@@ -77,6 +85,7 @@ public sealed class ShellCoordinator : IDisposable
     private readonly System.Windows.Forms.Timer _edgeSensorTimer;
     private readonly System.Windows.Forms.Timer _statusTimer;
     private readonly System.Windows.Forms.Timer _weatherTimer;
+    private readonly System.Windows.Forms.Timer _launchWatchTimer;
 
     private bool _disposed;
 
@@ -115,6 +124,9 @@ public sealed class ShellCoordinator : IDisposable
         _weatherTimer = new System.Windows.Forms.Timer { Interval = 15 * 60 * 1000 };
         _weatherTimer.Tick += async (_, __) => { if (_widgetsHost != null) await _widgetsHost.RefreshWeatherAsync(); };
 
+        _launchWatchTimer = new System.Windows.Forms.Timer { Interval = 75 };
+        _launchWatchTimer.Tick += (_, __) => PollPendingGenieLaunches();
+
         _configMgr.ConfigChanged += OnConfigChanged;
         _hotkeyWin.HotkeyPressed += OnHotkeyPressed;
         _ = _uiMarshaler.Handle;
@@ -124,10 +136,20 @@ public sealed class ShellCoordinator : IDisposable
             if (!_uiMarshaler.IsDisposed)
                 _uiMarshaler.BeginInvoke(() => OnExternalMinimizeStarted(hwnd));
         };
+        _lifecycleMonitor.WindowMinimizeEnded += hwnd =>
+        {
+            if (!_uiMarshaler.IsDisposed)
+                _uiMarshaler.BeginInvoke(() => OnExternalMinimizeEnded(hwnd));
+        };
         _lifecycleMonitor.WindowShown += hwnd =>
         {
             if (!_uiMarshaler.IsDisposed)
                 _uiMarshaler.BeginInvoke(() => OnExternalWindowShown(hwnd));
+        };
+        _lifecycleMonitor.WindowDestroyed += hwnd =>
+        {
+            if (!_uiMarshaler.IsDisposed)
+                _uiMarshaler.BeginInvoke(() => OnExternalWindowDestroyed(hwnd));
         };
     }
 
@@ -211,8 +233,16 @@ public sealed class ShellCoordinator : IDisposable
             _appsSvc, _icons, _windowMgr,
             () => OpenGlassLab(),
             OpenExpose);
+        _launcher.LaunchAppRequested += app =>
+        {
+            Rectangle iconRect = ResolveDockIconRect(0, app.LaunchTarget, app.Name);
+            LaunchAppWithGenie(app.LaunchTarget, app.Arguments, app.Name, iconRect);
+        };
+        _launcher.RestoreWindowRequested += hwnd => RestoreWindowWithGenie(hwnd);
 
         _expose = new ExposeOverlayWindow(_gpu, _configMgr, _backdrop, _windowMgr, _icons);
+        _expose.CloseWindowRequested += hwnd => CloseWindowWithGenie(hwnd);
+        _expose.RestoreWindowRequested += hwnd => RestoreWindowWithGenie(hwnd);
 
         _settingsLab = new SettingsGlassLabWindow(
             _gpu, _configMgr, _backdrop,
@@ -391,11 +421,29 @@ public sealed class ShellCoordinator : IDisposable
 
             var openWins = _windowMgr.GetOpenWindows();
             var fgWin = _windowMgr.GetForegroundExternalWindow();
-            if (!_safeMode && fgWin != null && !fgWin.IsMinimized && fgWin.Handle != 0
-                && WindowSnapshotService.GetCached(fgWin.Handle, TimeSpan.FromMilliseconds(1200)) == null)
+
+            _trackedWindows.Clear();
+            foreach (var w in openWins)
+                _trackedWindows[w.Handle] = w;
+
+            if (!_safeMode)
             {
-                nint capHwnd = fgWin.Handle;
-                _ = Task.Run(() => WindowSnapshotService.CaptureWindow(capHwnd, allowScreenFallback: false));
+                var snapTargets = openWins
+                    .Where(w => !w.IsMinimized && w.Width >= 100 && w.Height >= 80)
+                    .OrderByDescending(w => w.IsForeground)
+                    .Take(3)
+                    .Where(w => WindowSnapshotService.GetCached(w.Handle, TimeSpan.FromMilliseconds(1500)) == null)
+                    .Select(w => (w.Handle, w.IsForeground))
+                    .ToList();
+
+                if (snapTargets.Count > 0)
+                {
+                    _ = Task.Run(() =>
+                    {
+                        foreach (var (capHwnd, isFg) in snapTargets)
+                            WindowSnapshotService.CaptureWindow(capHwnd, allowScreenFallback: isFg, wgcFallback: _backdrop);
+                    });
+                }
             }
             var net = await _networkSvc.GetNetworkStatusAsync();
             var bt = await _networkSvc.GetBluetoothStatusAsync();
@@ -695,12 +743,117 @@ public sealed class ShellCoordinator : IDisposable
         return new Rectangle(bounds.Left + bounds.Width / 2 - 26, bounds.Bottom - 72, 52, 52);
     }
 
+    private void PeekDockForGenie()
+    {
+        if (!_configMgr.Current.Dock.AutoHide) return;
+        foreach (var d in _docks) d.PeekTemporarily(850);
+    }
+
     private void LaunchAppWithGenie(string target, string? arguments, string appName, Rectangle iconRect)
     {
         string exeName = string.IsNullOrWhiteSpace(target) ? appName : Path.GetFileNameWithoutExtension(target);
+        var existing = new HashSet<nint>(_windowMgr.GetOpenWindows().Select(w => w.Handle));
         _pendingGenieLaunches.RemoveAll(p => DateTime.UtcNow > p.ExpiresUtc);
-        _pendingGenieLaunches.Add((appName, exeName, iconRect, DateTime.UtcNow.AddSeconds(4.5)));
+        _pendingGenieLaunches.Add(new PendingGenieLaunch(appName, exeName, iconRect, existing, DateTime.UtcNow.AddSeconds(4.5)));
+        if (!_launchWatchTimer.Enabled)
+            _launchWatchTimer.Start();
+        PeekDockForGenie();
         _appsSvc.LaunchApp(target, arguments ?? "");
+    }
+
+    private void PollPendingGenieLaunches()
+    {
+        _pendingGenieLaunches.RemoveAll(p => DateTime.UtcNow > p.ExpiresUtc);
+        if (_pendingGenieLaunches.Count == 0 || _genieOverlay == null || _safeMode)
+        {
+            _launchWatchTimer.Stop();
+            return;
+        }
+
+        var openWins = _windowMgr.GetOpenWindows();
+        foreach (var win in openWins)
+        {
+            if (win.IsMinimized || win.Width < 120 || win.Height < 100) continue;
+            if (TryMatchAndTriggerPendingLaunch(win))
+                break;
+        }
+
+        if (_pendingGenieLaunches.Count == 0)
+            _launchWatchTimer.Stop();
+    }
+
+    private bool TryMatchAndTriggerPendingLaunch(WindowInfo win)
+    {
+        if (_pendingGenieLaunches.Count == 0 || _genieOverlay == null) return false;
+        string procFriendly = win.ProcessName ?? "";
+        string rawExe = string.IsNullOrWhiteSpace(win.ExecutablePath) ? "" : Path.GetFileNameWithoutExtension(win.ExecutablePath);
+
+        int matchIdx = _pendingGenieLaunches.FindIndex(p =>
+            !p.ExistingHwnds.Contains(win.Handle) &&
+            ((!string.IsNullOrWhiteSpace(rawExe) && (p.ExeName.Equals(rawExe, StringComparison.OrdinalIgnoreCase) || p.ExeName.Contains(rawExe, StringComparison.OrdinalIgnoreCase) || rawExe.Contains(p.ExeName, StringComparison.OrdinalIgnoreCase)))
+             || (!string.IsNullOrWhiteSpace(procFriendly) && (p.AppName.Contains(procFriendly, StringComparison.OrdinalIgnoreCase) || procFriendly.Contains(p.AppName, StringComparison.OrdinalIgnoreCase)))
+             || (!string.IsNullOrWhiteSpace(win.Title) && win.Title.Contains(p.AppName, StringComparison.OrdinalIgnoreCase))));
+
+        // Fallback: if user just clicked a single app < 3s ago and a brand new top-level foreground window appeared, bind it cleanly
+        if (matchIdx < 0 && _pendingGenieLaunches.Count == 1 && win.IsForeground && !_pendingGenieLaunches[0].ExistingHwnds.Contains(win.Handle))
+            matchIdx = 0;
+
+        if (matchIdx < 0) return false;
+
+        var launch = _pendingGenieLaunches[matchIdx];
+        _pendingGenieLaunches.RemoveAt(matchIdx);
+        SuppressLifecycleEvents(win.Handle, 1500);
+        StartLaunchEmergeSequence(win.Handle, launch.IconRect);
+        return true;
+    }
+
+    private void StartLaunchEmergeSequence(nint hwnd, Rectangle iconRect)
+    {
+        if (_genieOverlay == null || hwnd == 0) return;
+        PeekDockForGenie();
+        Win32Interop.SetWindowCloaked(hwnd, true);
+        _ = Task.Delay(95).ContinueWith(_ =>
+        {
+            if (_uiMarshaler.IsDisposed) return;
+            _uiMarshaler.BeginInvoke(() =>
+            {
+                if (!Win32Interop.IsWindow(hwnd)) return;
+                var snap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: false);
+                if (snap == null)
+                {
+                    // Some GPU/Chromium apps don't paint while cloaked: uncloak briefly, grab WGC/screen snapshot, then Genie Emerge
+                    Win32Interop.SetWindowCloaked(hwnd, false);
+                    _ = Task.Delay(60).ContinueWith(__ =>
+                    {
+                        if (_uiMarshaler.IsDisposed) return;
+                        _uiMarshaler.BeginInvoke(() =>
+                        {
+                            var postSnap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: true, wgcFallback: _backdrop);
+                            if (postSnap != null)
+                            {
+                                Win32Interop.SetWindowCloaked(hwnd, true);
+                                _genieOverlay.PlayGenieEmerge(postSnap, iconRect, _configMgr.Current.Dock.Position, () =>
+                                {
+                                    Win32Interop.SetWindowCloaked(hwnd, false);
+                                    Win32Interop.SetForegroundWindow(hwnd);
+                                });
+                            }
+                            else
+                            {
+                                Win32Interop.SetForegroundWindow(hwnd);
+                            }
+                        });
+                    });
+                    return;
+                }
+
+                _genieOverlay.PlayGenieEmerge(snap, iconRect, _configMgr.Current.Dock.Position, () =>
+                {
+                    Win32Interop.SetWindowCloaked(hwnd, false);
+                    Win32Interop.SetForegroundWindow(hwnd);
+                });
+            });
+        });
     }
 
     private void MinimizeWindowWithGenie(nint hwnd, Rectangle? explicitIconRect = null)
@@ -708,23 +861,28 @@ public sealed class ShellCoordinator : IDisposable
         if (hwnd == 0) return;
         SuppressLifecycleEvents(hwnd);
 
-        var snap = WindowSnapshotService.CaptureWindow(hwnd)
-                   ?? WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(5));
-        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd);
-        Rectangle iconRect = explicitIconRect ?? ResolveDockIconRect(hwnd, winInfo?.ProcessName, winInfo?.Title);
+        var snap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: true, wgcFallback: _backdrop)
+                   ?? WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(10));
+        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd)
+                      ?? (_trackedWindows.TryGetValue(hwnd, out var tracked) ? tracked : null);
+        Rectangle iconRect = explicitIconRect ?? ResolveDockIconRect(hwnd, winInfo?.ExecutablePath ?? winInfo?.ProcessName, winInfo?.Title);
 
         _windowMgr.MinimizeWindow(hwnd);
         if (snap != null && _genieOverlay != null && !_safeMode)
+        {
+            PeekDockForGenie();
             _genieOverlay.PlayGenieCollapse(snap, iconRect, _configMgr.Current.Dock.Position);
+        }
     }
 
     private void RestoreWindowWithGenie(nint hwnd, Rectangle? explicitIconRect = null)
     {
         if (hwnd == 0) return;
-        SuppressLifecycleEvents(hwnd, 1400);
+        SuppressLifecycleEvents(hwnd, 1500);
 
-        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd);
-        Rectangle iconRect = explicitIconRect ?? ResolveDockIconRect(hwnd, winInfo?.ProcessName, winInfo?.Title);
+        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd)
+                      ?? (_trackedWindows.TryGetValue(hwnd, out var tracked) ? tracked : null);
+        Rectangle iconRect = explicitIconRect ?? ResolveDockIconRect(hwnd, winInfo?.ExecutablePath ?? winInfo?.ProcessName, winInfo?.Title);
 
         if (_genieOverlay == null || _safeMode)
         {
@@ -732,17 +890,22 @@ public sealed class ShellCoordinator : IDisposable
             return;
         }
 
+        PeekDockForGenie();
         Win32Interop.SetWindowCloaked(hwnd, true);
         Win32Interop.ShowWindow(hwnd, Win32Interop.SW_RESTORE);
 
-        _ = Task.Delay(35).ContinueWith(_ =>
+        _ = Task.Delay(50).ContinueWith(_ =>
         {
             if (_uiMarshaler.IsDisposed) return;
             _uiMarshaler.BeginInvoke(() =>
             {
-                var snap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: false);
+                var snap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: false)
+                           ?? WindowSnapshotService.GetCached(hwnd, TimeSpan.FromMinutes(15));
                 if (snap != null)
                 {
+                    if (WindowSnapshotService.TryGetRenderBounds(hwnd, out var liveBounds) && snap.ScreenBounds != liveBounds)
+                        snap = snap with { ScreenBounds = liveBounds };
+
                     _genieOverlay.PlayGenieEmerge(snap, iconRect, _configMgr.Current.Dock.Position, () =>
                     {
                         Win32Interop.SetWindowCloaked(hwnd, false);
@@ -761,20 +924,21 @@ public sealed class ShellCoordinator : IDisposable
     private void CloseWindowWithGenie(nint hwnd, Rectangle? explicitIconRect = null)
     {
         if (hwnd == 0) return;
-        SuppressLifecycleEvents(hwnd, 1400);
+        SuppressLifecycleEvents(hwnd, 1500);
 
-        var snap = WindowSnapshotService.CaptureWindow(hwnd)
-                   ?? WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(5));
-        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd);
-        Rectangle iconRect = explicitIconRect ?? ResolveDockIconRect(hwnd, winInfo?.ProcessName, winInfo?.Title);
+        var snap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: true, wgcFallback: _backdrop)
+                   ?? WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(10));
+        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd)
+                      ?? (_trackedWindows.TryGetValue(hwnd, out var tracked) ? tracked : null);
+        Rectangle iconRect = explicitIconRect ?? ResolveDockIconRect(hwnd, winInfo?.ExecutablePath ?? winInfo?.ProcessName, winInfo?.Title);
 
         if (snap != null && _genieOverlay != null && !_safeMode)
         {
+            PeekDockForGenie();
             Win32Interop.SetWindowCloaked(hwnd, true);
             _windowMgr.CloseWindow(hwnd);
             _genieOverlay.PlayGenieCollapse(snap, iconRect, _configMgr.Current.Dock.Position, () =>
             {
-                // Uncloak if the app stayed open (e.g. "Save changes?" prompt)
                 if (Win32Interop.IsWindow(hwnd))
                     Win32Interop.SetWindowCloaked(hwnd, false);
                 WindowSnapshotService.Invalidate(hwnd);
@@ -792,7 +956,7 @@ public sealed class ShellCoordinator : IDisposable
         if (targetHwnd == 0) return;
 
         var beforeSnap = (_genieOverlay != null && !_safeMode)
-            ? WindowSnapshotService.CaptureWindow(targetHwnd, allowScreenFallback: false)
+            ? WindowSnapshotService.CaptureWindow(targetHwnd, allowScreenFallback: true, wgcFallback: _backdrop)
             : null;
 
         if (beforeSnap != null)
@@ -816,15 +980,42 @@ public sealed class ShellCoordinator : IDisposable
     private void OnExternalMinimizeStarted(nint hwnd)
     {
         if (IsLifecycleSuppressed(hwnd) || _genieOverlay == null || _safeMode) return;
-        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd);
+        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd)
+                      ?? (_trackedWindows.TryGetValue(hwnd, out var tracked) ? tracked : null);
         if (winInfo == null) return;
 
-        var snap = WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(4))
+        var snap = WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(12))
+                   ?? WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: true, wgcFallback: _backdrop);
+        if (snap == null) return;
+
+        PeekDockForGenie();
+        Rectangle iconRect = ResolveDockIconRect(hwnd, winInfo.ExecutablePath ?? winInfo.ProcessName, winInfo.Title);
+        _genieOverlay.PlayGenieCollapse(snap, iconRect, _configMgr.Current.Dock.Position);
+    }
+
+    private void OnExternalMinimizeEnded(nint hwnd)
+    {
+        if (IsLifecycleSuppressed(hwnd) || _genieOverlay == null || _safeMode) return;
+        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd)
+                      ?? (_trackedWindows.TryGetValue(hwnd, out var tracked) ? tracked : null);
+        if (winInfo == null) return;
+
+        var snap = WindowSnapshotService.GetCached(hwnd, TimeSpan.FromMinutes(15))
                    ?? WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: false);
         if (snap == null) return;
 
-        Rectangle iconRect = ResolveDockIconRect(hwnd, winInfo.ProcessName, winInfo.Title);
-        _genieOverlay.PlayGenieCollapse(snap, iconRect, _configMgr.Current.Dock.Position);
+        if (WindowSnapshotService.TryGetRenderBounds(hwnd, out var liveBounds))
+            snap = snap with { ScreenBounds = liveBounds };
+
+        PeekDockForGenie();
+        SuppressLifecycleEvents(hwnd, 1000);
+        Win32Interop.SetWindowCloaked(hwnd, true);
+        Rectangle iconRect = ResolveDockIconRect(hwnd, winInfo.ExecutablePath ?? winInfo.ProcessName, winInfo.Title);
+        _genieOverlay.PlayGenieEmerge(snap, iconRect, _configMgr.Current.Dock.Position, () =>
+        {
+            Win32Interop.SetWindowCloaked(hwnd, false);
+            Win32Interop.SetForegroundWindow(hwnd);
+        });
     }
 
     private void OnExternalWindowShown(nint hwnd)
@@ -839,40 +1030,23 @@ public sealed class ShellCoordinator : IDisposable
         if (!WindowSnapshotService.TryGetRenderBounds(hwnd, out var rect) || rect.Width < 120 || rect.Height < 100) return;
 
         var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd);
-        if (winInfo == null) return;
+        if (winInfo != null)
+            TryMatchAndTriggerPendingLaunch(winInfo);
+    }
 
-        string procName = winInfo.ProcessName ?? "";
-        int matchIdx = _pendingGenieLaunches.FindIndex(p =>
-            (!string.IsNullOrWhiteSpace(procName) && (p.ExeName.Contains(procName, StringComparison.OrdinalIgnoreCase) || procName.Contains(p.ExeName, StringComparison.OrdinalIgnoreCase)))
-            || winInfo.Title.Contains(p.AppName, StringComparison.OrdinalIgnoreCase));
+    private void OnExternalWindowDestroyed(nint hwnd)
+    {
+        if (IsLifecycleSuppressed(hwnd) || _genieOverlay == null || _safeMode) return;
+        if (!_trackedWindows.TryGetValue(hwnd, out var winInfo)) return;
+        _trackedWindows.Remove(hwnd);
 
-        if (matchIdx < 0) return;
+        var snap = WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(15));
+        WindowSnapshotService.Invalidate(hwnd);
+        if (snap == null) return;
 
-        var launch = _pendingGenieLaunches[matchIdx];
-        _pendingGenieLaunches.RemoveAt(matchIdx);
-        SuppressLifecycleEvents(hwnd, 1500);
-
-        Win32Interop.SetWindowCloaked(hwnd, true);
-        _ = Task.Delay(55).ContinueWith(_ =>
-        {
-            if (_uiMarshaler.IsDisposed) return;
-            _uiMarshaler.BeginInvoke(() =>
-            {
-                var snap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: false);
-                if (snap != null)
-                {
-                    _genieOverlay.PlayGenieEmerge(snap, launch.IconRect, _configMgr.Current.Dock.Position, () =>
-                    {
-                        Win32Interop.SetWindowCloaked(hwnd, false);
-                        Win32Interop.SetForegroundWindow(hwnd);
-                    });
-                }
-                else
-                {
-                    Win32Interop.SetWindowCloaked(hwnd, false);
-                }
-            });
-        });
+        PeekDockForGenie();
+        Rectangle iconRect = ResolveDockIconRect(hwnd, winInfo.ExecutablePath ?? winInfo.ProcessName, winInfo.Title);
+        _genieOverlay.PlayGenieCollapse(snap, iconRect, _configMgr.Current.Dock.Position);
     }
 
     private NotifyIcon BuildTrayIcon()
@@ -1157,6 +1331,47 @@ public sealed class ShellCoordinator : IDisposable
             });
             SaveBgraPng(ntSurf.CaptureOffscreenBgra(), 384, 650, Path.Combine(outDir, "surface_notifications.png"));
         }
+
+        // 9. Render Genie Effect Proof Frames (curling window funnel into exact bottom Dock icon)
+        var sampleWinRect = new Rectangle(380, 120, 760, 560);
+        var sampleIconRect = new Rectangle(920, 995, 56, 56);
+        byte[] sampleWinBgra = BuildSampleAppWindowBgra(sampleWinRect.Width, sampleWinRect.Height);
+        var sampleSnap = new WindowSnapshot(0, sampleWinBgra, sampleWinRect.Width, sampleWinRect.Height, sampleWinRect, DateTime.UtcNow);
+        float[] genieProgress = { 0.15f, 0.38f, 0.62f, 0.84f };
+        for (int gi = 0; gi < genieProgress.Length; gi++)
+        {
+            byte[] frameBgra = GenieOverlayWindow.RenderOffscreenSampleBgra(gpu, bw, bh, sampleSnap, sampleIconRect, DockPosition.Bottom, genieProgress[gi]);
+            SaveBgraPng(frameBgra, bw, bh, Path.Combine(outDir, $"genie_proof_{gi + 1}.png"));
+        }
+    }
+
+    private static byte[] BuildSampleAppWindowBgra(int w, int h)
+    {
+        using var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.Clear(Color.FromArgb(255, 24, 28, 38));
+            using var barBrush = new SolidBrush(Color.FromArgb(255, 38, 44, 60));
+            g.FillRectangle(barBrush, 0, 0, w, 46);
+            using var red = new SolidBrush(Color.FromArgb(255, 255, 95, 86));
+            using var yellow = new SolidBrush(Color.FromArgb(255, 255, 189, 46));
+            using var green = new SolidBrush(Color.FromArgb(255, 39, 201, 63));
+            g.FillEllipse(red, 18, 15, 14, 14);
+            g.FillEllipse(yellow, 40, 15, 14, 14);
+            g.FillEllipse(green, 62, 15, 14, 14);
+            using var cardBrush = new SolidBrush(Color.FromArgb(255, 48, 86, 168));
+            g.FillRectangle(cardBrush, 28, 72, w - 56, 140);
+            using var font = new Font("Segoe UI", 22f, System.Drawing.FontStyle.Bold);
+            using var white = new SolidBrush(Color.White);
+            g.DrawString("GENIE WINDOW SNAPSHOT", font, white, 48, 122);
+            using var gridPen = new Pen(Color.FromArgb(140, 110, 180, 255), 2f);
+            for (int y = 240; y < h - 30; y += 44) g.DrawLine(gridPen, 28, y, w - 28, y);
+        }
+        var bd = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        byte[] bytes = new byte[w * h * 4];
+        Marshal.Copy(bd.Scan0, bytes, 0, bytes.Length);
+        bmp.UnlockBits(bd);
+        return bytes;
     }
 
     private static byte[] BuildOpticalVerificationBackdrop(int w, int h, int shiftX = 0)
@@ -1211,10 +1426,12 @@ public sealed class ShellCoordinator : IDisposable
         _edgeSensorTimer.Stop();
         _statusTimer.Stop();
         _weatherTimer.Stop();
+        _launchWatchTimer.Stop();
         _renderTimer.Dispose();
         _edgeSensorTimer.Dispose();
         _statusTimer.Dispose();
         _weatherTimer.Dispose();
+        _launchWatchTimer.Dispose();
 
         for (int i = 1; i <= 7; i++)
             Win32Interop.UnregisterHotKey(_hotkeyWin.Handle, i);

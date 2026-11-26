@@ -33,7 +33,7 @@ public static class WindowSnapshotService
         if (hwnd != 0) _cache.TryRemove(hwnd, out _);
     }
 
-    public static WindowSnapshot? CaptureWindow(nint hwnd, bool allowScreenFallback = true)
+    public static WindowSnapshot? CaptureWindow(nint hwnd, bool allowScreenFallback = true, WgcDesktopCaptureService? wgcFallback = null)
     {
         if (hwnd == 0 || !Win32Interop.IsWindow(hwnd)) return null;
 
@@ -46,6 +46,26 @@ public static class WindowSnapshotService
             int h = Math.Clamp(rect.Height, 16, 2160);
 
             byte[]? pixels = CaptureViaGdi(hwnd, rect, w, h, allowScreenFallback);
+            if (pixels == null && allowScreenFallback && wgcFallback != null
+                && Win32Interop.IsWindowVisible(hwnd) && !Win32Interop.IsIconic(hwnd))
+            {
+                var clamped = new Rectangle(
+                    Math.Max(0, rect.Left),
+                    Math.Max(0, rect.Top),
+                    Math.Clamp(rect.Right, 1, Math.Max(1, wgcFallback.TextureWidth)) - Math.Max(0, rect.Left),
+                    Math.Clamp(rect.Bottom, 1, Math.Max(1, wgcFallback.TextureHeight)) - Math.Max(0, rect.Top));
+                if (clamped.Width >= 16 && clamped.Height >= 16)
+                {
+                    pixels = wgcFallback.CaptureRegionBgra(clamped);
+                    if (pixels != null)
+                    {
+                        w = clamped.Width;
+                        h = clamped.Height;
+                        rect = clamped;
+                    }
+                }
+            }
+
             if (pixels == null)
                 return null;
 

@@ -1,3 +1,4 @@
+using System.Drawing;
 using System.Runtime.InteropServices;
 using ProjectCrystal.Core.Configuration;
 using ProjectCrystal.Core.Diagnostics;
@@ -292,6 +293,60 @@ public sealed class WgcDesktopCaptureService : IDesktopBackdropSource
         finally
         {
             _context.Unmap(_probeStagingTex, 0);
+        }
+    }
+
+    public byte[]? CaptureRegionBgra(Rectangle screenRegion)
+    {
+        if (_disposed || _sharedTex == null || _width < 16 || _height < 16)
+            return null;
+
+        int x = Math.Clamp(screenRegion.Left, 0, _width - 1);
+        int y = Math.Clamp(screenRegion.Top, 0, _height - 1);
+        int right = Math.Clamp(screenRegion.Right, x + 1, _width);
+        int bottom = Math.Clamp(screenRegion.Bottom, y + 1, _height);
+        int w = right - x;
+        int h = bottom - y;
+        if (w < 16 || h < 16) return null;
+
+        lock (_deviceLock)
+        lock (SyncRoot)
+        {
+            if (_sharedTex == null) return null;
+            using var staging = _device.CreateTexture2D(new Texture2DDescription
+            {
+                Width = w,
+                Height = h,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.B8G8R8A8_UNorm,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Staging,
+                BindFlags = BindFlags.None,
+                CPUAccessFlags = CpuAccessFlags.Read
+            });
+
+            var box = new Vortice.Mathematics.Box(x, y, 0, x + w, y + h, 1);
+            _context.CopySubresourceRegion(staging, 0, 0, 0, 0, _sharedTex, 0, box);
+
+            var map = _context.Map(staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+            try
+            {
+                byte[] pixels = new byte[w * h * 4];
+                unsafe
+                {
+                    byte* src = (byte*)map.DataPointer;
+                    for (int row = 0; row < h; row++)
+                        Marshal.Copy((nint)(src + row * map.RowPitch), pixels, row * w * 4, w * 4);
+                }
+                for (int i = 3; i < pixels.Length; i += 4)
+                    pixels[i] = 255;
+                return pixels;
+            }
+            finally
+            {
+                _context.Unmap(staging, 0);
+            }
         }
     }
 
