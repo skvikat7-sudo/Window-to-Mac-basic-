@@ -65,6 +65,11 @@ public sealed class ShellCoordinator : IDisposable
     private ExposeOverlayWindow? _expose;
     private SettingsGlassLabWindow? _settingsLab;
     private ContextMenuWindow? _contextMenu;
+    private GenieOverlayWindow? _genieOverlay;
+    private readonly WindowLifecycleMonitor _lifecycleMonitor = new();
+    private readonly Dictionary<nint, DateTime> _suppressedLifecycleHwnds = new();
+    private readonly List<(string AppName, string ExeName, Rectangle IconRect, DateTime ExpiresUtc)> _pendingGenieLaunches = new();
+    private readonly Control _uiMarshaler = new();
 
     private readonly HotkeyMessageWindow _hotkeyWin = new();
     private readonly NotifyIcon _trayIcon;
@@ -112,6 +117,18 @@ public sealed class ShellCoordinator : IDisposable
 
         _configMgr.ConfigChanged += OnConfigChanged;
         _hotkeyWin.HotkeyPressed += OnHotkeyPressed;
+        _ = _uiMarshaler.Handle;
+
+        _lifecycleMonitor.WindowMinimizeStarted += hwnd =>
+        {
+            if (!_uiMarshaler.IsDisposed)
+                _uiMarshaler.BeginInvoke(() => OnExternalMinimizeStarted(hwnd));
+        };
+        _lifecycleMonitor.WindowShown += hwnd =>
+        {
+            if (!_uiMarshaler.IsDisposed)
+                _uiMarshaler.BeginInvoke(() => OnExternalWindowShown(hwnd));
+        };
     }
 
     public async Task InitializeAsync()
@@ -130,6 +147,8 @@ public sealed class ShellCoordinator : IDisposable
 
         CreateAndShowSurfaces();
         RegisterGlobalHotkeys();
+        if (!_safeMode)
+            _lifecycleMonitor.Start();
 
         if (!_safeMode)
         {
@@ -175,6 +194,7 @@ public sealed class ShellCoordinator : IDisposable
 
     private void CreateAndShowSurfaces()
     {
+        _genieOverlay ??= new GenieOverlayWindow(_gpu, _configMgr);
         _contextMenu = new ContextMenuWindow(_gpu, _configMgr, _backdrop);
 
         _controlCenter = new ControlCenterWindow(
@@ -182,6 +202,7 @@ public sealed class ShellCoordinator : IDisposable
             _audioSvc, _displaySvc, _networkSvc, _mediaSvc, _windowMgr,
             () => OpenGlassLab(),
             OpenExpose);
+        _controlCenter.SnapRequested += t => SnapWindowWithMorph(0, t);
 
         _notificationCenter = new NotificationCenterWindow(_gpu, _configMgr, _backdrop, _notifSvc);
 
@@ -286,6 +307,9 @@ public sealed class ShellCoordinator : IDisposable
                     OpenExpose,
                     () => OpenGlassLab(),
                     ToggleShowDesktop);
+                dock.GenieLaunchRequested += (item, iconRect) => LaunchAppWithGenie(item.Target, item.Arguments, item.Name, iconRect);
+                dock.GenieMinimizeRequested += (hwnd, iconRect) => MinimizeWindowWithGenie(hwnd, iconRect);
+                dock.GenieRestoreRequested += (hwnd, iconRect) => RestoreWindowWithGenie(hwnd, iconRect);
                 dock.RebuildItems(openWins);
                 if (!cfg.Dock.AutoHide)
                     dock.Show();
@@ -349,6 +373,7 @@ public sealed class ShellCoordinator : IDisposable
         if (_settingsLab != null) anyRendered |= _settingsLab.TickAndRenderIfNeeded(commitDComp: false);
         if (_contextMenu != null) anyRendered |= _contextMenu.TickAndRenderIfNeeded(commitDComp: false);
         if (_widgetsHost != null) anyRendered |= _widgetsHost.TickAll(commitDComp: false);
+        if (_genieOverlay != null) anyRendered |= _genieOverlay.TickAndRenderIfNeeded(commitDComp: false);
 
         if (anyRendered)
         {
@@ -366,6 +391,12 @@ public sealed class ShellCoordinator : IDisposable
 
             var openWins = _windowMgr.GetOpenWindows();
             var fgWin = _windowMgr.GetForegroundExternalWindow();
+            if (!_safeMode && fgWin != null && !fgWin.IsMinimized && fgWin.Handle != 0
+                && WindowSnapshotService.GetCached(fgWin.Handle, TimeSpan.FromMilliseconds(1200)) == null)
+            {
+                nint capHwnd = fgWin.Handle;
+                _ = Task.Run(() => WindowSnapshotService.CaptureWindow(capHwnd, allowScreenFallback: false));
+            }
             var net = await _networkSvc.GetNetworkStatusAsync();
             var bt = await _networkSvc.GetBluetoothStatusAsync();
             var bat = PowerBatteryService.GetBatteryStatus();
@@ -477,13 +508,13 @@ public sealed class ShellCoordinator : IDisposable
         {
             new($"Active: {title}", Enabled: false),
             new("", IsSeparator: true),
-            new("Snap Left Half", () => _windowMgr.SnapWindow(win?.Handle ?? 0, SnapTarget.LeftHalf, 12, 12), ShortcutHint: "Ctrl+Alt+←"),
-            new("Snap Right Half", () => _windowMgr.SnapWindow(win?.Handle ?? 0, SnapTarget.RightHalf, 12, 12), ShortcutHint: "Ctrl+Alt+→"),
-            new("Maximize Window", () => _windowMgr.SnapWindow(win?.Handle ?? 0, SnapTarget.Maximize, 12, 12), ShortcutHint: "Ctrl+Alt+M"),
-            new("Center Focus", () => _windowMgr.SnapWindow(win?.Handle ?? 0, SnapTarget.CenterFocus, 12, 12)),
+            new("Snap Left Half", () => SnapWindowWithMorph(win?.Handle ?? 0, SnapTarget.LeftHalf), ShortcutHint: "Ctrl+Alt+←"),
+            new("Snap Right Half", () => SnapWindowWithMorph(win?.Handle ?? 0, SnapTarget.RightHalf), ShortcutHint: "Ctrl+Alt+→"),
+            new("Maximize Window", () => SnapWindowWithMorph(win?.Handle ?? 0, SnapTarget.Maximize), ShortcutHint: "Ctrl+Alt+M"),
+            new("Center Focus", () => SnapWindowWithMorph(win?.Handle ?? 0, SnapTarget.CenterFocus)),
             new("", IsSeparator: true),
-            new("Minimize", () => { if (win != null) _windowMgr.MinimizeWindow(win.Handle); }, Enabled: win != null),
-            new("Close Window", () => { if (win != null) _windowMgr.CloseWindow(win.Handle); }, Enabled: win != null)
+            new("Minimize", () => { if (win != null) MinimizeWindowWithGenie(win.Handle); }, Enabled: win != null),
+            new("Close Window", () => { if (win != null) CloseWindowWithGenie(win.Handle); }, Enabled: win != null)
         }, 238);
     }
 
@@ -517,7 +548,10 @@ public sealed class ShellCoordinator : IDisposable
                 nint capH = h;
                 entries.Add(new(title, () =>
                 {
-                    _windowMgr.FocusWindow(capH);
+                    if (winObj?.IsMinimized == true)
+                        RestoreWindowWithGenie(capH);
+                    else
+                        _windowMgr.FocusWindow(capH);
                     var latest = _windowMgr.GetOpenWindows();
                     foreach (var d in _docks) d.RebuildItems(latest);
                 }));
@@ -556,10 +590,10 @@ public sealed class ShellCoordinator : IDisposable
         if (item.IsRunning && item.ActiveWindowHandle != 0)
         {
             entries.Add(new("", IsSeparator: true));
-            entries.Add(new("Snap Left", () => _windowMgr.SnapWindow(item.ActiveWindowHandle, SnapTarget.LeftHalf, 12, 12)));
-            entries.Add(new("Snap Right", () => _windowMgr.SnapWindow(item.ActiveWindowHandle, SnapTarget.RightHalf, 12, 12)));
-            entries.Add(new("Minimize", () => _windowMgr.MinimizeWindow(item.ActiveWindowHandle)));
-            entries.Add(new("Close Window", () => _windowMgr.CloseWindow(item.ActiveWindowHandle)));
+            entries.Add(new("Snap Left", () => SnapWindowWithMorph(item.ActiveWindowHandle, SnapTarget.LeftHalf)));
+            entries.Add(new("Snap Right", () => SnapWindowWithMorph(item.ActiveWindowHandle, SnapTarget.RightHalf)));
+            entries.Add(new("Minimize", () => MinimizeWindowWithGenie(item.ActiveWindowHandle)));
+            entries.Add(new("Close Window", () => CloseWindowWithGenie(item.ActiveWindowHandle)));
         }
 
         _contextMenu?.ShowMenu(pt, entries, 224);
@@ -630,10 +664,215 @@ public sealed class ShellCoordinator : IDisposable
             case 2: OpenExpose(); break;
             case 3: OpenControlCenter(scr); break;
             case 4: OpenNotificationCenter(scr); break;
-            case 5: _windowMgr.SnapWindow(0, SnapTarget.LeftHalf, 12, 12); break;
-            case 6: _windowMgr.SnapWindow(0, SnapTarget.RightHalf, 12, 12); break;
-            case 7: _windowMgr.SnapWindow(0, SnapTarget.Maximize, 12, 12); break;
+            case 5: SnapWindowWithMorph(0, SnapTarget.LeftHalf); break;
+            case 6: SnapWindowWithMorph(0, SnapTarget.RightHalf); break;
+            case 7: SnapWindowWithMorph(0, SnapTarget.Maximize); break;
         }
+    }
+
+    private void SuppressLifecycleEvents(nint hwnd, int ms = 1100)
+    {
+        if (hwnd != 0)
+            _suppressedLifecycleHwnds[hwnd] = DateTime.UtcNow.AddMilliseconds(ms);
+    }
+
+    private bool IsLifecycleSuppressed(nint hwnd)
+    {
+        if (_suppressedLifecycleHwnds.TryGetValue(hwnd, out var until))
+        {
+            if (DateTime.UtcNow < until) return true;
+            _suppressedLifecycleHwnds.Remove(hwnd);
+        }
+        return false;
+    }
+
+    private Rectangle ResolveDockIconRect(nint hwnd, string? processPath = null, string? title = null)
+    {
+        if (_docks.Count > 0)
+            return _docks[0].GetIconScreenRectForWindow(hwnd, processPath, title);
+
+        var bounds = (Screen.PrimaryScreen ?? Screen.AllScreens[0]).Bounds;
+        return new Rectangle(bounds.Left + bounds.Width / 2 - 26, bounds.Bottom - 72, 52, 52);
+    }
+
+    private void LaunchAppWithGenie(string target, string? arguments, string appName, Rectangle iconRect)
+    {
+        string exeName = string.IsNullOrWhiteSpace(target) ? appName : Path.GetFileNameWithoutExtension(target);
+        _pendingGenieLaunches.RemoveAll(p => DateTime.UtcNow > p.ExpiresUtc);
+        _pendingGenieLaunches.Add((appName, exeName, iconRect, DateTime.UtcNow.AddSeconds(4.5)));
+        _appsSvc.LaunchApp(target, arguments ?? "");
+    }
+
+    private void MinimizeWindowWithGenie(nint hwnd, Rectangle? explicitIconRect = null)
+    {
+        if (hwnd == 0) return;
+        SuppressLifecycleEvents(hwnd);
+
+        var snap = WindowSnapshotService.CaptureWindow(hwnd)
+                   ?? WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(5));
+        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd);
+        Rectangle iconRect = explicitIconRect ?? ResolveDockIconRect(hwnd, winInfo?.ProcessName, winInfo?.Title);
+
+        _windowMgr.MinimizeWindow(hwnd);
+        if (snap != null && _genieOverlay != null && !_safeMode)
+            _genieOverlay.PlayGenieCollapse(snap, iconRect, _configMgr.Current.Dock.Position);
+    }
+
+    private void RestoreWindowWithGenie(nint hwnd, Rectangle? explicitIconRect = null)
+    {
+        if (hwnd == 0) return;
+        SuppressLifecycleEvents(hwnd, 1400);
+
+        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd);
+        Rectangle iconRect = explicitIconRect ?? ResolveDockIconRect(hwnd, winInfo?.ProcessName, winInfo?.Title);
+
+        if (_genieOverlay == null || _safeMode)
+        {
+            _windowMgr.FocusWindow(hwnd);
+            return;
+        }
+
+        Win32Interop.SetWindowCloaked(hwnd, true);
+        Win32Interop.ShowWindow(hwnd, Win32Interop.SW_RESTORE);
+
+        _ = Task.Delay(35).ContinueWith(_ =>
+        {
+            if (_uiMarshaler.IsDisposed) return;
+            _uiMarshaler.BeginInvoke(() =>
+            {
+                var snap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: false);
+                if (snap != null)
+                {
+                    _genieOverlay.PlayGenieEmerge(snap, iconRect, _configMgr.Current.Dock.Position, () =>
+                    {
+                        Win32Interop.SetWindowCloaked(hwnd, false);
+                        Win32Interop.SetForegroundWindow(hwnd);
+                    });
+                }
+                else
+                {
+                    Win32Interop.SetWindowCloaked(hwnd, false);
+                    _windowMgr.FocusWindow(hwnd);
+                }
+            });
+        });
+    }
+
+    private void CloseWindowWithGenie(nint hwnd, Rectangle? explicitIconRect = null)
+    {
+        if (hwnd == 0) return;
+        SuppressLifecycleEvents(hwnd, 1400);
+
+        var snap = WindowSnapshotService.CaptureWindow(hwnd)
+                   ?? WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(5));
+        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd);
+        Rectangle iconRect = explicitIconRect ?? ResolveDockIconRect(hwnd, winInfo?.ProcessName, winInfo?.Title);
+
+        if (snap != null && _genieOverlay != null && !_safeMode)
+        {
+            Win32Interop.SetWindowCloaked(hwnd, true);
+            _windowMgr.CloseWindow(hwnd);
+            _genieOverlay.PlayGenieCollapse(snap, iconRect, _configMgr.Current.Dock.Position, () =>
+            {
+                // Uncloak if the app stayed open (e.g. "Save changes?" prompt)
+                if (Win32Interop.IsWindow(hwnd))
+                    Win32Interop.SetWindowCloaked(hwnd, false);
+                WindowSnapshotService.Invalidate(hwnd);
+            });
+        }
+        else
+        {
+            _windowMgr.CloseWindow(hwnd);
+        }
+    }
+
+    private void SnapWindowWithMorph(nint hwnd, SnapTarget target)
+    {
+        nint targetHwnd = hwnd != 0 ? hwnd : _windowMgr.GetForegroundExternalWindow()?.Handle ?? 0;
+        if (targetHwnd == 0) return;
+
+        var beforeSnap = (_genieOverlay != null && !_safeMode)
+            ? WindowSnapshotService.CaptureWindow(targetHwnd, allowScreenFallback: false)
+            : null;
+
+        if (beforeSnap != null)
+            Win32Interop.SetWindowCloaked(targetHwnd, true);
+
+        bool snapped = _windowMgr.SnapWindow(targetHwnd, target, 12, 12);
+        if (snapped && beforeSnap != null && WindowSnapshotService.TryGetRenderBounds(targetHwnd, out var newRect) && _genieOverlay != null)
+        {
+            _genieOverlay.PlayWindowMorph(beforeSnap, newRect, () =>
+            {
+                Win32Interop.SetWindowCloaked(targetHwnd, false);
+                Win32Interop.SetForegroundWindow(targetHwnd);
+            });
+        }
+        else if (beforeSnap != null)
+        {
+            Win32Interop.SetWindowCloaked(targetHwnd, false);
+        }
+    }
+
+    private void OnExternalMinimizeStarted(nint hwnd)
+    {
+        if (IsLifecycleSuppressed(hwnd) || _genieOverlay == null || _safeMode) return;
+        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd);
+        if (winInfo == null) return;
+
+        var snap = WindowSnapshotService.GetCached(hwnd, TimeSpan.FromSeconds(4))
+                   ?? WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: false);
+        if (snap == null) return;
+
+        Rectangle iconRect = ResolveDockIconRect(hwnd, winInfo.ProcessName, winInfo.Title);
+        _genieOverlay.PlayGenieCollapse(snap, iconRect, _configMgr.Current.Dock.Position);
+    }
+
+    private void OnExternalWindowShown(nint hwnd)
+    {
+        if (_pendingGenieLaunches.Count == 0 || _genieOverlay == null || _safeMode) return;
+        _pendingGenieLaunches.RemoveAll(p => DateTime.UtcNow > p.ExpiresUtc);
+        if (_pendingGenieLaunches.Count == 0) return;
+
+        if (!Win32Interop.IsWindowVisible(hwnd) || Win32Interop.IsIconic(hwnd)) return;
+        int exStyle = Win32Interop.GetWindowLong(hwnd, Win32Interop.GWL_EXSTYLE);
+        if ((exStyle & Win32Interop.WS_EX_TOOLWINDOW) != 0) return;
+        if (!WindowSnapshotService.TryGetRenderBounds(hwnd, out var rect) || rect.Width < 120 || rect.Height < 100) return;
+
+        var winInfo = _windowMgr.GetOpenWindows().FirstOrDefault(w => w.Handle == hwnd);
+        if (winInfo == null) return;
+
+        string procName = winInfo.ProcessName ?? "";
+        int matchIdx = _pendingGenieLaunches.FindIndex(p =>
+            (!string.IsNullOrWhiteSpace(procName) && (p.ExeName.Contains(procName, StringComparison.OrdinalIgnoreCase) || procName.Contains(p.ExeName, StringComparison.OrdinalIgnoreCase)))
+            || winInfo.Title.Contains(p.AppName, StringComparison.OrdinalIgnoreCase));
+
+        if (matchIdx < 0) return;
+
+        var launch = _pendingGenieLaunches[matchIdx];
+        _pendingGenieLaunches.RemoveAt(matchIdx);
+        SuppressLifecycleEvents(hwnd, 1500);
+
+        Win32Interop.SetWindowCloaked(hwnd, true);
+        _ = Task.Delay(55).ContinueWith(_ =>
+        {
+            if (_uiMarshaler.IsDisposed) return;
+            _uiMarshaler.BeginInvoke(() =>
+            {
+                var snap = WindowSnapshotService.CaptureWindow(hwnd, allowScreenFallback: false);
+                if (snap != null)
+                {
+                    _genieOverlay.PlayGenieEmerge(snap, launch.IconRect, _configMgr.Current.Dock.Position, () =>
+                    {
+                        Win32Interop.SetWindowCloaked(hwnd, false);
+                        Win32Interop.SetForegroundWindow(hwnd);
+                    });
+                }
+                else
+                {
+                    Win32Interop.SetWindowCloaked(hwnd, false);
+                }
+            });
+        });
     }
 
     private NotifyIcon BuildTrayIcon()
@@ -986,6 +1225,10 @@ public sealed class ShellCoordinator : IDisposable
 
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
+        _lifecycleMonitor.Dispose();
+        _genieOverlay?.Close();
+        _genieOverlay?.Dispose();
+        _uiMarshaler.Dispose();
 
         foreach (var mb in _menuBars) { mb.Close(); mb.Dispose(); }
         foreach (var d in _docks) { d.Close(); d.Dispose(); }

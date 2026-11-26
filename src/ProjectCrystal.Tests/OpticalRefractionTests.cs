@@ -87,4 +87,14 @@ public sealed class OpticalRefractionTests
         double frameDelta = MeanAbsDiff(refractOutput1, refractOutput2, 600, 220, new Rectangle(46, 36, 508, 148));
         Assert.True(frameDelta > 5.0, $"Expected dynamic refraction update when underlying text moves, got MeanAbsDiff={frameDelta:F2}");
     }
+
+    [Fact]
+    public void GenieShader_CompilesAndBindsCleanly_OnGpuDevice()
+    {
+        using var gpu = new GpuDeviceContext();
+        Assert.NotNull(gpu.GenieVertexShader);
+        Assert.NotNull(gpu.GeniePixelShader);
+        Assert.NotNull(gpu.GenieConstantBuffer);
+        Assert.NotNull(gpu.PremultipliedBlendState);
+    }
 }

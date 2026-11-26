@@ -27,8 +27,12 @@ public sealed class GpuDeviceContext : IDisposable
 
     public ID3D11VertexShader GlassVertexShader { get; }
     public ID3D11PixelShader GlassPixelShader { get; }
+    public ID3D11VertexShader GenieVertexShader { get; }
+    public ID3D11PixelShader GeniePixelShader { get; }
     public ID3D11SamplerState LinearClampSampler { get; }
     public ID3D11Buffer GlassConstantBuffer { get; }
+    public ID3D11Buffer GenieConstantBuffer { get; }
+    public ID3D11BlendState PremultipliedBlendState { get; }
 
     public string AdapterName { get; }
     public double AdapterMemoryMb { get; }
@@ -66,12 +70,19 @@ public sealed class GpuDeviceContext : IDisposable
         D2DDevice = D2DFactory.CreateDevice(dxgiDevice);
         DWriteFactory = DWrite.DWriteCreateFactory<IDWriteFactory>();
 
-        string shaderPath = LocateShaderPath();
+        string shaderPath = LocateShaderPath("LiquidGlass.hlsl");
         string hlslSource = File.ReadAllText(shaderPath);
         var vsBlob = Compiler.Compile(hlslSource, "VS", shaderPath, "vs_5_0");
         var psBlob = Compiler.Compile(hlslSource, "PS", shaderPath, "ps_5_0");
         GlassVertexShader = D3DDevice.CreateVertexShader(vsBlob.Span);
         GlassPixelShader = D3DDevice.CreatePixelShader(psBlob.Span);
+
+        string geniePath = LocateShaderPath("GenieEffect.hlsl");
+        string genieSource = File.ReadAllText(geniePath);
+        var gvsBlob = Compiler.Compile(genieSource, "VS", geniePath, "vs_5_0");
+        var gpsBlob = Compiler.Compile(genieSource, "PS", geniePath, "ps_5_0");
+        GenieVertexShader = D3DDevice.CreateVertexShader(gvsBlob.Span);
+        GeniePixelShader = D3DDevice.CreatePixelShader(gpsBlob.Span);
 
         LinearClampSampler = D3DDevice.CreateSamplerState(new SamplerDescription
         {
@@ -93,6 +104,28 @@ public sealed class GpuDeviceContext : IDisposable
             BindFlags = BindFlags.ConstantBuffer,
             CPUAccessFlags = CpuAccessFlags.Write
         });
+
+        GenieConstantBuffer = D3DDevice.CreateBuffer(new BufferDescription
+        {
+            ByteWidth = 64, // 4 x float4
+            Usage = ResourceUsage.Dynamic,
+            BindFlags = BindFlags.ConstantBuffer,
+            CPUAccessFlags = CpuAccessFlags.Write
+        });
+
+        var blendDesc = new Vortice.Direct3D11.BlendDescription();
+        blendDesc.RenderTarget[0] = new Vortice.Direct3D11.RenderTargetBlendDescription
+        {
+            BlendEnable = true,
+            SourceBlend = Vortice.Direct3D11.Blend.One,
+            DestinationBlend = Vortice.Direct3D11.Blend.InverseSourceAlpha,
+            BlendOperation = Vortice.Direct3D11.BlendOperation.Add,
+            SourceBlendAlpha = Vortice.Direct3D11.Blend.One,
+            DestinationBlendAlpha = Vortice.Direct3D11.Blend.InverseSourceAlpha,
+            BlendOperationAlpha = Vortice.Direct3D11.BlendOperation.Add,
+            RenderTargetWriteMask = Vortice.Direct3D11.ColorWriteEnable.All
+        };
+        PremultipliedBlendState = D3DDevice.CreateBlendState(blendDesc);
 
         CreateInitialFallbackBackdrop();
         CrystalLogger.Info("GPU", $"Initialized Direct3D11 + DirectComposition + Direct2D1 on '{AdapterName}'.");
@@ -152,20 +185,20 @@ public sealed class GpuDeviceContext : IDisposable
         UpdateFallbackBackdrop(px, w, h);
     }
 
-    private static string LocateShaderPath()
+    private static string LocateShaderPath(string fileName)
     {
         string[] candidates =
         {
-            Path.Combine(AppContext.BaseDirectory, "Shaders", "LiquidGlass.hlsl"),
-            Path.Combine(AppContext.BaseDirectory, "LiquidGlass.hlsl"),
-            Path.Combine(Directory.GetCurrentDirectory(), "Shaders", "LiquidGlass.hlsl"),
-            Path.Combine(Directory.GetCurrentDirectory(), "src", "ProjectCrystal.Rendering", "Shaders", "LiquidGlass.hlsl")
+            Path.Combine(AppContext.BaseDirectory, "Shaders", fileName),
+            Path.Combine(AppContext.BaseDirectory, fileName),
+            Path.Combine(Directory.GetCurrentDirectory(), "Shaders", fileName),
+            Path.Combine(Directory.GetCurrentDirectory(), "src", "ProjectCrystal.Rendering", "Shaders", fileName)
         };
         foreach (string c in candidates)
         {
             if (File.Exists(c)) return c;
         }
-        throw new FileNotFoundException("Could not locate LiquidGlass.hlsl shader file.");
+        throw new FileNotFoundException($"Could not locate {fileName} shader file.");
     }
 
     public static Vector4 ParseHexColor(string hex, float alpha = 1f)
@@ -187,6 +220,10 @@ public sealed class GpuDeviceContext : IDisposable
         {
             _fallbackSrv?.Dispose();
             _fallbackTex?.Dispose();
+            PremultipliedBlendState.Dispose();
+            GenieConstantBuffer.Dispose();
+            GeniePixelShader.Dispose();
+            GenieVertexShader.Dispose();
             GlassConstantBuffer.Dispose();
             LinearClampSampler.Dispose();
             GlassPixelShader.Dispose();

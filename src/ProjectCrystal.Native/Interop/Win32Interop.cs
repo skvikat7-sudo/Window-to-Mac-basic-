@@ -45,8 +45,20 @@ public static class Win32Interop
 
     public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
     public const int DWMWA_EXCLUDED_FROM_PEEK = 12;
+    public const int DWMWA_CLOAK = 13;
     public const int DWMWA_CLOAKED = 14;
     public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+
+    public const uint PW_CLIENTONLY = 0x00000001;
+    public const uint PW_RENDERFULLCONTENT = 0x00000002;
+    public const uint SRCCOPY = 0x00CC0020;
+
+    public const uint EVENT_SYSTEM_MINIMIZESTART = 0x0016;
+    public const uint EVENT_SYSTEM_MINIMIZEEND = 0x0017;
+    public const uint EVENT_OBJECT_SHOW = 0x8002;
+    public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+    public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
+    public const int OBJID_WINDOW = 0;
 
     public enum QUERY_USER_NOTIFICATION_STATE
     {
@@ -342,6 +354,81 @@ public static class Win32Interop
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool GetSystemTimes(out FILETIME lpIdleTime, out FILETIME lpKernelTime, out FILETIME lpUserTime);
 
+    public delegate void WinEventDelegate(
+        nint hWinEventHook, uint eventType, nint hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WINDOWPLACEMENT
+    {
+        public int length;
+        public int flags;
+        public int showCmd;
+        public POINT ptMinPosition;
+        public POINT ptMaxPosition;
+        public RECT rcNormalPosition;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAPINFOHEADER
+    {
+        public uint biSize;
+        public int biWidth;
+        public int biHeight;
+        public ushort biPlanes;
+        public ushort biBitCount;
+        public uint biCompression;
+        public uint biSizeImage;
+        public int biXPelsPerMeter;
+        public int biYPelsPerMeter;
+        public uint biClrUsed;
+        public uint biClrImportant;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAPINFO
+    {
+        public BITMAPINFOHEADER bmiHeader;
+        public uint bmiColors;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(nint hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool PrintWindow(nint hwnd, nint hdcBlt, uint nFlags);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowPlacement(nint hWnd, ref WINDOWPLACEMENT lpwndpl);
+
+    [DllImport("user32.dll")]
+    public static extern nint GetDC(nint hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern int ReleaseDC(nint hWnd, nint hDC);
+
+    [DllImport("user32.dll")]
+    public static extern nint SetWinEventHook(
+        uint eventMin, uint eventMax, nint hmodWinEventProc, WinEventDelegate lpfnWinEventProc,
+        uint idProcess, uint idThread, uint dwFlags);
+
+    [DllImport("user32.dll")]
+    public static extern bool UnhookWinEvent(nint hWinEventHook);
+
+    [DllImport("gdi32.dll")]
+    public static extern nint CreateCompatibleDC(nint hdc);
+
+    [DllImport("gdi32.dll")]
+    public static extern bool DeleteDC(nint hdc);
+
+    [DllImport("gdi32.dll")]
+    public static extern nint SelectObject(nint hdc, nint hgdiobj);
+
+    [DllImport("gdi32.dll")]
+    public static extern nint CreateDIBSection(nint hdc, ref BITMAPINFO pbmi, uint usage, out nint ppvBits, nint hSection, uint offset);
+
+    [DllImport("gdi32.dll")]
+    public static extern bool BitBlt(nint hdcDest, int xDest, int yDest, int wDest, int hDest, nint hdcSrc, int xSrc, int ySrc, uint rop);
+
     [DllImport("gdi32.dll")]
     public static extern bool DeleteObject(nint hObject);
 
@@ -353,5 +440,12 @@ public static class Win32Interop
         if (SystemParametersInfo(SPI_GETCLIENTAREAANIMATION, 0, out bool enabled, 0))
             return !enabled;
         return false;
+    }
+
+    public static void SetWindowCloaked(nint hwnd, bool cloaked)
+    {
+        if (hwnd == 0) return;
+        int val = cloaked ? 1 : 0;
+        DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, ref val, sizeof(int));
     }
 }

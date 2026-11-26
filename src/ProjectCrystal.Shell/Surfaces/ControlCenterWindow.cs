@@ -44,6 +44,8 @@ public sealed class ControlCenterWindow : GlassWindowBase
 
     protected override PanelMotionPreset MotionPreset => PanelMotionPreset.MacPopover;
 
+    public event Action<SnapTarget>? SnapRequested;
+
     public ControlCenterWindow(
         GpuDeviceContext gpu,
         ConfigManager configMgr,
@@ -408,10 +410,10 @@ public sealed class ControlCenterWindow : GlassWindowBase
 
         var items = new (string Label, int Glyph, Action Act)[]
         {
-            ("Left", 0, () => _windowMgr.SnapWindow(0, SnapTarget.LeftHalf, 12, 12)),
-            ("Right", 1, () => _windowMgr.SnapWindow(0, SnapTarget.RightHalf, 12, 12)),
-            ("Full", 2, () => _windowMgr.SnapWindow(0, SnapTarget.Maximize, 12, 12)),
-            ("Center", 3, () => _windowMgr.SnapWindow(0, SnapTarget.CenterFocus, 12, 12))
+            ("Left", 0, () => { if (SnapRequested != null) SnapRequested(SnapTarget.LeftHalf); else _windowMgr.SnapWindow(0, SnapTarget.LeftHalf, 12, 12); }),
+            ("Right", 1, () => { if (SnapRequested != null) SnapRequested(SnapTarget.RightHalf); else _windowMgr.SnapWindow(0, SnapTarget.RightHalf, 12, 12); }),
+            ("Full", 2, () => { if (SnapRequested != null) SnapRequested(SnapTarget.Maximize); else _windowMgr.SnapWindow(0, SnapTarget.Maximize, 12, 12); }),
+            ("Center", 3, () => { if (SnapRequested != null) SnapRequested(SnapTarget.CenterFocus); else _windowMgr.SnapWindow(0, SnapTarget.CenterFocus, 12, 12); })
         };
 
         float bx = x + 12f;

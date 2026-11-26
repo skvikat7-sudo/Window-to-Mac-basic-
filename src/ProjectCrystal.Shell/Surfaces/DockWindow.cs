@@ -73,6 +73,10 @@ public sealed class DockWindow : GlassWindowBase
     private Point _mouseDownPoint;
     private RectangleF _dockCapsuleRect;
 
+    public event Action<DockItemView, Rectangle>? GenieLaunchRequested;
+    public event Action<nint, Rectangle>? GenieMinimizeRequested;
+    public event Action<nint, Rectangle>? GenieRestoreRequested;
+
     public DockWindow(
         GpuDeviceContext gpu,
         ConfigManager configMgr,
@@ -870,6 +874,7 @@ public sealed class DockWindow : GlassWindowBase
         int idx = FindSlotAt(e.Location);
         if (idx < 0) return;
         var item = _renderedSlots[idx].Item;
+        var iconScreenRect = GetSlotScreenRect(idx);
         TriggerBounce(item.Id);
 
         if (item.IsSpecialDesktop)
@@ -899,32 +904,106 @@ public sealed class DockWindow : GlassWindowBase
             {
                 if (handles != null && handles.Count > 1)
                 {
-                    // Cycle smoothly to the next open/minimized window of this app
                     int curIdx = -1;
                     for (int hIdx = 0; hIdx < handles.Count; hIdx++)
                     {
                         if (handles[hIdx] == target) { curIdx = hIdx; break; }
                     }
                     nint nextHandle = handles[(curIdx + 1) % handles.Count];
-                    _windowMgr.FocusWindow(nextHandle);
+                    if (Win32Interop.IsIconic(nextHandle) && GenieRestoreRequested != null)
+                        GenieRestoreRequested.Invoke(nextHandle, iconScreenRect);
+                    else
+                        _windowMgr.FocusWindow(nextHandle);
                 }
                 else
                 {
-                    // Windows Taskbar behavior: click active window to toggle-minimize cleanly
-                    _windowMgr.MinimizeWindow(target);
+                    if (GenieMinimizeRequested != null)
+                        GenieMinimizeRequested.Invoke(target, iconScreenRect);
+                    else
+                        _windowMgr.MinimizeWindow(target);
                 }
             }
             else
             {
-                // Restore (even if minimized / temporarily closed!) and bring straight to front
-                _windowMgr.FocusWindow(target);
+                if (Win32Interop.IsIconic(target) && GenieRestoreRequested != null)
+                    GenieRestoreRequested.Invoke(target, iconScreenRect);
+                else
+                    _windowMgr.FocusWindow(target);
             }
             RebuildItems(_windowMgr.GetOpenWindows());
         }
         else
         {
-            _appsService.LaunchApp(item.Target, item.Arguments);
+            if (GenieLaunchRequested != null)
+                GenieLaunchRequested.Invoke(item, iconScreenRect);
+            else
+                _appsService.LaunchApp(item.Target, item.Arguments);
         }
+    }
+
+    public Rectangle GetIconScreenRectForWindow(nint hwnd, string? processPath = null, string? title = null)
+    {
+        for (int i = 0; i < _renderedSlots.Count; i++)
+        {
+            var slot = _renderedSlots[i].Item;
+            if (slot.ActiveWindowHandle == hwnd || (slot.WindowHandles != null && slot.WindowHandles.Contains(hwnd)))
+                return GetSlotScreenRect(i);
+        }
+
+        string exeName = string.IsNullOrWhiteSpace(processPath) ? "" : Path.GetFileNameWithoutExtension(processPath);
+        if (!string.IsNullOrWhiteSpace(exeName))
+        {
+            for (int i = 0; i < _renderedSlots.Count; i++)
+            {
+                var slot = _renderedSlots[i].Item;
+                if (slot.IsSeparator || slot.IsSpecialDesktop || slot.IsSpecialExpose || slot.IsSpecialSettings || slot.IsSpecialStack)
+                    continue;
+                string slotExe = string.IsNullOrWhiteSpace(slot.Target) ? "" : Path.GetFileNameWithoutExtension(slot.Target);
+                if ((!string.IsNullOrWhiteSpace(slotExe) && slotExe.Equals(exeName, StringComparison.OrdinalIgnoreCase))
+                    || slot.Name.Contains(exeName, StringComparison.OrdinalIgnoreCase)
+                    || exeName.Contains(slot.Name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return GetSlotScreenRect(i);
+                }
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(title))
+        {
+            for (int i = 0; i < _renderedSlots.Count; i++)
+            {
+                var slot = _renderedSlots[i].Item;
+                if (!slot.IsSeparator && title.Contains(slot.Name, StringComparison.OrdinalIgnoreCase))
+                    return GetSlotScreenRect(i);
+            }
+        }
+
+        // Fallback to center of dock capsule (or monitor bottom-center if hidden)
+        int iconSz = Math.Max(40, (int)Config.Dock.IconSize);
+        if (_dockCapsuleRect.Width > 10 && _dockCapsuleRect.Height > 10)
+        {
+            int cx = Left + (int)(_dockCapsuleRect.X + _dockCapsuleRect.Width * 0.5f - iconSz * 0.5f);
+            int cy = Top + (int)(_dockCapsuleRect.Y + _dockCapsuleRect.Height * 0.5f - iconSz * 0.5f);
+            return new Rectangle(cx, cy, iconSz, iconSz);
+        }
+        return Config.Dock.Position switch
+        {
+            DockPosition.Left => new Rectangle(_monitorBounds.Left + 16, _monitorBounds.Top + _monitorBounds.Height / 2 - iconSz / 2, iconSz, iconSz),
+            DockPosition.Right => new Rectangle(_monitorBounds.Right - 16 - iconSz, _monitorBounds.Top + _monitorBounds.Height / 2 - iconSz / 2, iconSz, iconSz),
+            _ => new Rectangle(_monitorBounds.Left + _monitorBounds.Width / 2 - iconSz / 2, _monitorBounds.Bottom - 20 - iconSz, iconSz, iconSz)
+        };
+    }
+
+    private Rectangle GetSlotScreenRect(int idx)
+    {
+        if (idx < 0 || idx >= _renderedSlots.Count)
+            return GetIconScreenRectForWindow(0);
+
+        var slot = _renderedSlots[idx];
+        int sz = Math.Max(28, (int)MathF.Round(slot.Size));
+        int sx = Left + (int)MathF.Round(slot.CenterX - sz * 0.5f);
+        int sy = Top + (int)MathF.Round(slot.CenterY - sz * 0.5f);
+        return new Rectangle(sx, sy, sz, sz);
     }
 
     private int FindSlotAt(Point pt)
