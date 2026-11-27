@@ -74,6 +74,10 @@ internal static class Program
                 {
                     try
                     {
+                        string shadersDir = Path.Combine(installDir, "Shaders");
+                        if (Directory.Exists(shadersDir))
+                            Directory.Delete(shadersDir, recursive: true);
+
                         archive.ExtractToDirectory(installDir, overwriteFiles: true);
                         lastErr = null;
                         break;
