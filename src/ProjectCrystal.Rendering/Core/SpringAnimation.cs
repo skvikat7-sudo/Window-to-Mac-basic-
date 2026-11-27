@@ -1,28 +1,5 @@
 namespace ProjectCrystal.Rendering.Core;
 
-public static class EasingCurves
-{
-    public static float EaseOutCubic(float t)
-    {
-        t = Math.Clamp(t, 0f, 1f);
-        float inv = 1f - t;
-        return 1f - inv * inv * inv;
-    }
-
-    public static float EaseOutQuint(float t)
-    {
-        t = Math.Clamp(t, 0f, 1f);
-        float inv = 1f - t;
-        return 1f - inv * inv * inv * inv * inv;
-    }
-
-    public static float SmoothStep(float edge0, float edge1, float x)
-    {
-        float t = Math.Clamp((x - edge0) / Math.Max(0.0001f, edge1 - edge0), 0f, 1f);
-        return t * t * (3f - 2f * t);
-    }
-}
-
 public struct SpringFloat
 {
     public float Value;

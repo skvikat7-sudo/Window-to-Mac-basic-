@@ -27,13 +27,8 @@ public sealed class GpuDeviceContext : IDisposable
 
     public ID3D11VertexShader GlassVertexShader { get; }
     public ID3D11PixelShader GlassPixelShader { get; }
-    public ID3D11VertexShader GenieVertexShader { get; }
-    public ID3D11PixelShader GeniePixelShader { get; }
     public ID3D11SamplerState LinearClampSampler { get; }
-    public ID3D11SamplerState AnisoClampSampler { get; }
     public ID3D11Buffer GlassConstantBuffer { get; }
-    public ID3D11Buffer GenieConstantBuffer { get; }
-    public ID3D11BlendState PremultipliedBlendState { get; }
 
     public string AdapterName { get; }
     public double AdapterMemoryMb { get; }
@@ -78,13 +73,6 @@ public sealed class GpuDeviceContext : IDisposable
         GlassVertexShader = D3DDevice.CreateVertexShader(vsBlob.Span);
         GlassPixelShader = D3DDevice.CreatePixelShader(psBlob.Span);
 
-        string geniePath = LocateShaderPath("GenieEffect.hlsl");
-        string genieSource = File.ReadAllText(geniePath);
-        var gvsBlob = Compiler.Compile(genieSource, "VS", geniePath, "vs_5_0");
-        var gpsBlob = Compiler.Compile(genieSource, "PS", geniePath, "ps_5_0");
-        GenieVertexShader = D3DDevice.CreateVertexShader(gvsBlob.Span);
-        GeniePixelShader = D3DDevice.CreatePixelShader(gpsBlob.Span);
-
         LinearClampSampler = D3DDevice.CreateSamplerState(new SamplerDescription
         {
             Filter = Vortice.Direct3D11.Filter.MinMagMipLinear,
@@ -92,18 +80,6 @@ public sealed class GpuDeviceContext : IDisposable
             AddressV = TextureAddressMode.Clamp,
             AddressW = TextureAddressMode.Clamp,
             MaxAnisotropy = 1,
-            ComparisonFunc = ComparisonFunction.Never,
-            MinLOD = 0,
-            MaxLOD = float.MaxValue
-        });
-
-        AnisoClampSampler = D3DDevice.CreateSamplerState(new SamplerDescription
-        {
-            Filter = Vortice.Direct3D11.Filter.Anisotropic,
-            AddressU = TextureAddressMode.Clamp,
-            AddressV = TextureAddressMode.Clamp,
-            AddressW = TextureAddressMode.Clamp,
-            MaxAnisotropy = 8,
             ComparisonFunc = ComparisonFunction.Never,
             MinLOD = 0,
             MaxLOD = float.MaxValue
@@ -117,28 +93,6 @@ public sealed class GpuDeviceContext : IDisposable
             BindFlags = BindFlags.ConstantBuffer,
             CPUAccessFlags = CpuAccessFlags.Write
         });
-
-        GenieConstantBuffer = D3DDevice.CreateBuffer(new BufferDescription
-        {
-            ByteWidth = 64, // 4 x float4
-            Usage = ResourceUsage.Dynamic,
-            BindFlags = BindFlags.ConstantBuffer,
-            CPUAccessFlags = CpuAccessFlags.Write
-        });
-
-        var blendDesc = new Vortice.Direct3D11.BlendDescription();
-        blendDesc.RenderTarget[0] = new Vortice.Direct3D11.RenderTargetBlendDescription
-        {
-            BlendEnable = true,
-            SourceBlend = Vortice.Direct3D11.Blend.One,
-            DestinationBlend = Vortice.Direct3D11.Blend.InverseSourceAlpha,
-            BlendOperation = Vortice.Direct3D11.BlendOperation.Add,
-            SourceBlendAlpha = Vortice.Direct3D11.Blend.One,
-            DestinationBlendAlpha = Vortice.Direct3D11.Blend.InverseSourceAlpha,
-            BlendOperationAlpha = Vortice.Direct3D11.BlendOperation.Add,
-            RenderTargetWriteMask = Vortice.Direct3D11.ColorWriteEnable.All
-        };
-        PremultipliedBlendState = D3DDevice.CreateBlendState(blendDesc);
 
         CreateInitialFallbackBackdrop();
         CrystalLogger.Info("GPU", $"Initialized Direct3D11 + DirectComposition + Direct2D1 on '{AdapterName}'.");
@@ -233,12 +187,7 @@ public sealed class GpuDeviceContext : IDisposable
         {
             _fallbackSrv?.Dispose();
             _fallbackTex?.Dispose();
-            PremultipliedBlendState.Dispose();
-            GenieConstantBuffer.Dispose();
-            GeniePixelShader.Dispose();
-            GenieVertexShader.Dispose();
             GlassConstantBuffer.Dispose();
-            AnisoClampSampler.Dispose();
             LinearClampSampler.Dispose();
             GlassPixelShader.Dispose();
             GlassVertexShader.Dispose();

@@ -87,22 +87,4 @@ public sealed class OpticalRefractionTests
         double frameDelta = MeanAbsDiff(refractOutput1, refractOutput2, 600, 220, new Rectangle(46, 36, 508, 148));
         Assert.True(frameDelta > 5.0, $"Expected dynamic refraction update when underlying text moves, got MeanAbsDiff={frameDelta:F2}");
     }
-
-    [Fact]
-    public void GenieShader_CompilesAndBindsCleanly_OnGpuDevice()
-    {
-        using var gpu = new GpuDeviceContext();
-        Assert.NotNull(gpu.GenieVertexShader);
-        Assert.NotNull(gpu.GeniePixelShader);
-        Assert.NotNull(gpu.GenieConstantBuffer);
-        Assert.NotNull(gpu.PremultipliedBlendState);
-        Assert.NotNull(gpu.AnisoClampSampler);
-
-        byte[] dummy = new byte[256 * 256 * 4];
-        Array.Fill(dummy, (byte)200);
-        var snap = new ProjectCrystal.Native.Capture.WindowSnapshot(0, dummy, 256, 256, new Rectangle(200, 100, 256, 256), DateTime.UtcNow);
-        byte[] rendered = ProjectCrystal.Rendering.UI.GenieOverlayWindow.RenderOffscreenSampleBgra(
-            gpu, 800, 600, snap, new Rectangle(370, 520, 50, 50), ProjectCrystal.Core.Configuration.DockPosition.Bottom, 0.45f);
-        Assert.Equal(800 * 600 * 4, rendered.Length);
-    }
 }

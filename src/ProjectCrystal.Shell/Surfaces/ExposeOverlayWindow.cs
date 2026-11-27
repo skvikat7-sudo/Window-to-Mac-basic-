@@ -26,9 +26,6 @@ public sealed class ExposeOverlayWindow : GlassWindowBase
 
     protected override PanelMotionPreset MotionPreset => PanelMotionPreset.MacMissionControl;
 
-    public event Action<nint>? CloseWindowRequested;
-    public event Action<nint>? RestoreWindowRequested;
-
     public ExposeOverlayWindow(
         GpuDeviceContext gpu,
         ConfigManager configMgr,
@@ -287,8 +284,7 @@ public sealed class ExposeOverlayWindow : GlassWindowBase
         {
             if (closeR.Contains(e.X, e.Y))
             {
-                if (CloseWindowRequested != null) CloseWindowRequested(win.Handle);
-                else _windowMgr.CloseWindow(win.Handle);
+                _windowMgr.CloseWindow(win.Handle);
                 RefreshWindowCards();
                 RegisterThumbnails();
                 MarkDirty();
@@ -297,8 +293,7 @@ public sealed class ExposeOverlayWindow : GlassWindowBase
             if (card.Contains(e.X, e.Y))
             {
                 CloseOverlay();
-                if (win.IsMinimized && RestoreWindowRequested != null) RestoreWindowRequested(win.Handle);
-                else _windowMgr.FocusWindow(win.Handle);
+                _windowMgr.FocusWindow(win.Handle);
                 return;
             }
         }
